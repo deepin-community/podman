@@ -1,0 +1,51 @@
+Tests: podman-info
+Depends: @, @recommends@
+Restrictions: allow-stderr, isolation-machine, needs-root
+
+Tests: podman-hello-world
+Architecture: amd64, arm64
+Depends: @, @recommends@
+Restrictions: allow-stderr, isolation-machine, needs-internet, skippable
+
+Tests: localsystem
+Architecture: amd64, arm64
+Depends: aardvark-dns,
+         apache2-utils,
+         bats,
+         build-essential,
+         containernetworking-plugins,
+         curl,
+         file,
+         ginkgo,
+         git,
+         golang-go,
+         iproute2,
+         iptables,
+         jq,
+         libsystemd-dev,
+         ncat,
+         netavark,
+         passt,
+         python3-yaml,
+         skopeo,
+         slirp4netns,
+         socat,
+         @,
+         @recommends@
+Restrictions: allow-stderr,
+              flaky,
+              isolation-machine,
+              needs-internet,
+              needs-root,
+              rw-build-tree,
+              skippable
+
+# works locally for me, but appears to take too long for debci
+# Tests: e2e
+# Architecture: amd64, arm64
+# Depends: @, @builddeps@, @recommends@, aardvark-dns, apache2-utils, netavark, iproute2, iptables, skopeo, gnupg2, jq, ncat
+# Restrictions: allow-stderr, flaky, isolation-machine, needs-internet
+
+Tests: builtin-tests
+Depends: @, @builddeps@, @recommends@
+Restrictions: allow-stderr, flaky, needs-root
