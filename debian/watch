@@ -1,0 +1,12 @@
+# uscan(1) configuration file.
+version=4
+
+opts="\
+pgpmode=none,\
+repacksuffix=+ds1,\
+repack,compression=xz,\
+dirversionmangle=s/-rc/~rc/,\
+uversionmangle=s/-rc/~rc/,\
+dversionmangle=s{[+~]ds\d*}{},\
+" https://github.com/containers/podman/tags \
+  .*/v?@ANY_VERSION@@ARCHIVE_EXT@
