@@ -1,0 +1,9 @@
+#!/bin/sh -ex
+
+export DH_GOLANG_BUILDPKG="github.com/containers/podman/cmd/podman"
+
+dh_auto_configure -O--buildsystem=golang -O--builddirectory=_build
+dh_auto_build -O--buildsystem=golang -O--builddirectory=_build
+
+dh_auto_test -O--buildsystem=golang -O--builddirectory=_build --no-parallel -- -timeout 30m
+

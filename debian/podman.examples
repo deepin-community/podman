@@ -1,0 +1,2 @@
+debian/examples/*
+test/policy.json
