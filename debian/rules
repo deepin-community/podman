@@ -114,6 +114,14 @@ execute_after_dh_installman:
 	rm -f --verbose $(CURDIR)/debian/podman-docker/usr/share/man/man1/dockersh.1*
 
 override_dh_installsystemd:
+ifeq (,$(filter uos Uos UOS,$(shell lsb_release  -i -s)))
+	dh_installsystemd
+	dh_installsystemd -ppodman --no-enable podman-auto-update.service
+	dh_installsystemd -ppodman --no-enable podman-restart.service
+	dh_installsystemd -ppodman --no-enable podman-auto-update.timer
+	dh_installsystemd -ppodman --no-enable podman-clean-transient.service
+else
 	dh_installsystemd
 	dh_installsystemd --name=podman-auto-update
 	dh_installsystemd --name=podman-restart
+endif
