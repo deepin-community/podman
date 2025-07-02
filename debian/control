@@ -8,6 +8,7 @@ Uploaders: Dmitry Smirnov <onlyjob@debian.org>,
            Faidon Liambotis <paravoid@debian.org>
 Build-Depends: bash-completion,
                conmon,
+               lsb-release,
                debhelper-compat (= 13),
                dh-golang,
                go-md2man,
