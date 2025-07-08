@@ -24,8 +24,8 @@ Windows.
   - [Create and start a podman machine](#create-and-start-a-podman-machine)
   - [Run a container using podman](#run-a-container-using-podman)
 - [Build and test the Podman Windows installer](#build-and-test-the-podman-windows-installer)
-  - [Build the installer](#build-the-installer)
-  - [Test the installer](#test-the-installer)
+  - [Build the Windows installer](#build-the-windows-installer)
+  - [Test the Windows installer](#test-the-windows-installer)
   - [Build and test the standalone `podman.msi` file](#build-and-test-the-standalone-podmanmsi-file)
   - [Verify the installation](#verify-the-installation)
   - [Uninstall and clean-up](#uninstall-and-clean-up)
@@ -94,7 +94,7 @@ The installer includes a C program that checks the installation of the
 pre-required virtualization providers (WSL or Hyper-V). Building this program
 requires the
 [Microsoft C/C++ compiler](https://learn.microsoft.com/en-us/cpp/build/building-on-the-command-line?view=msvc-170) and the
-[PowerShell Moduel VSSetup](https://github.com/microsoft/vssetup.powershell):
+[PowerShell Module VSSetup](https://github.com/microsoft/vssetup.powershell):
 
 1. Download the Build Tools for Visual Studio 2022 installer
 ```pwsh
@@ -315,7 +315,7 @@ The Podman Windows installer (e.g., `podman-5.1.0-dev-setup.exe`) is a bundle
 that includes an msi package (`podman.msi`) and installs the WSL kernel
 (`podman-wslkerninst.exe`). It's built using the
 [WiX Toolset](https://wixtoolset.org/) and the
-[PanelSwWixExtension](https://github.com/nirbar/PanelSwWixExtension/tree/wix3-v3.11.1.353)
+[PanelSwWixExtension](https://github.com/nirbar/PanelSwWixExtension/tree/master5)
 WiX extension. The source code is in the folder `contrib\win-installer`.
 
 ### Build the Windows installer
@@ -362,11 +362,36 @@ set the bundle variables `MachineProvider` (`wsl` or `hyperv`), `WSLCheckbox`
 otherwise):
 
 ```pwsh
-contrib\win-installer\podman-5.1.0-dev-setup.exe /install /log podman-setup.log /quiet MachineProvider=wsl WSLCheckbox=0 HyperVCheckbox=0
+contrib\win-installer\podman-5.1.0-dev-setup.exe /install `
+                      /log podman-setup.log /quiet `
+                      MachineProvider=wsl WSLCheckbox=0 HyperVCheckbox=0
 ```
 
-:information_source: The `winmake.ps1` target `installertest` automatically
-tests installing and uninstalling Podman.
+:information_source: If uninstallation fails, the installer may end up in an
+inconsistent state. Podman results as uninstalled, but some install packages are
+still tracked in the Windows registry and will affect further tentative to
+re-install Podman. When this is the case, trying to re-install Podman results in
+the installer returning zero (success) but no action is executed. The trailing
+packages `GID` can be found in installation logs:
+
+```
+Detected related package: {<GID>}
+```
+
+To fix this problem remove the related packages:
+
+```pwsh
+msiexec /x "{<GID>}"
+```
+
+#### Run the Windows installer automated tests
+
+The following command executes a number of tests of the windows installer. Running
+it requires an administrator terminal.
+
+```pwsh
+.\winmake.ps1 installertest [wsl|hyperv]
+```
 
 ### Build and test the standalone `podman.msi` file
 
@@ -403,9 +428,9 @@ msiexec /package contrib\win-installer\en-US\podman.msi /l*v podman-msi.log /qui
 ```
 
 :information_source: `podman.msi` GUI dialogs, defined in the file
-`contrib\win-installer\podman-ui.wxs`, are distinct from the installation bundle
+`contrib\win-installer\welcome-install-dlg.wxs`, are distinct from the installation bundle
 `podman-setup.exe` GUI dialogs, defined in
-`contrib\win-installer\welcome-install-dlg.wxs`.
+`contrib\win-installer\podman-theme.xml`.
 
 ### Verify the installation
 
@@ -435,7 +460,12 @@ $env:PATH | Select-String -Pattern "Podman"
 
 :information_source: Podman CI uses script
 `contrib\cirrus\win-installer-main.ps1`. Use it locally, too, to build and test
-the installer.
+the installer:
+
+```pwsh
+$ENV:CONTAINERS_MACHINE_PROVIDER='wsl'; .\contrib\cirrus\win-installer-main.ps1
+$ENV:CONTAINERS_MACHINE_PROVIDER='hyperv'; .\contrib\cirrus\win-installer-main.ps1
+```
 
 ### Uninstall and clean-up
 
@@ -472,7 +502,7 @@ $foldersToCheck = @(
     "$env:USERPROFILE.config\containers\"
     "$env:USERPROFILE.local\share\containers\"
     "$ENV:LOCALAPPDATA\containers\"
-    "$ENV:APPDATA\containers\containers.conf.d\99-podman-machine-provider.conf"
+    "$ENV:PROGRAMDATA\containers\containers.conf.d\99-podman-machine-provider.conf"
 )
 $foldersToCheck | ForEach-Object {Test-Path -Path $PSItem}
 ```
@@ -505,5 +535,6 @@ MacOS and Windows and then performs the same checks as the `lint` target plus
 many more.
 
 :information_source: Create and start a Podman machine before running
-`winmake.ps1 lint`. Configure the Podman machine with at least 4GB of memory:
+`winmake.ps1 validatepr`. Configure the Podman machine with at least 4GB of
+memory:
 `podman machine init -m 4096`.
