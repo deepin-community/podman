@@ -62,17 +62,13 @@ var _ = BeforeSuite(func() {
 	if err != nil {
 		Fail("unable to create testProvider")
 	}
-	if testProvider.VMType() == define.WSLVirt {
-		pullError = pullWSLDisk()
-	} else {
-		// This is a one-off and a little messy but once WSL switches
-		// to use OCI disk artifacts, we can make all the conditionals cleaner.
-		testDiskProvider := testProvider.VMType()
-		if testDiskProvider == define.LibKrun {
-			testDiskProvider = define.AppleHvVirt // libkrun uses the applehv image for testing
-		}
-		pullError = pullOCITestDisk(tmpDir, testDiskProvider)
+
+	testDiskProvider := testProvider.VMType()
+	if testDiskProvider == define.LibKrun {
+		testDiskProvider = define.AppleHvVirt // libkrun uses the applehv image for testing
 	}
+	pullError = pullOCITestDisk(tmpDir, testDiskProvider)
+
 	if pullError != nil {
 		Fail(fmt.Sprintf("failed to pull disk: %q", pullError))
 	}
@@ -102,6 +98,19 @@ var _ = SynchronizedAfterSuite(func() {}, func() {
 	}
 })
 
+// The config does not matter to much for our testing, however we
+// would like to be sure podman machine is not effected by certain
+// settings as we should be using full URLs anywhere.
+// https://github.com/containers/podman/issues/24567
+const sshConfigContent = `
+Host *
+  User NOT_REAL
+  Port 9999
+Host 127.0.0.1
+  User blah
+  IdentityFile ~/.ssh/id_ed25519
+`
+
 func setup() (string, *machineTestBuilder) {
 	// Set TMPDIR if this needs a new directory
 	if value, ok := os.LookupEnv("TMPDIR"); ok {
@@ -122,7 +131,7 @@ func setup() (string, *machineTestBuilder) {
 	if err != nil {
 		Fail(fmt.Sprintf("failed to create ssh config: %q", err))
 	}
-	if _, err := sshConfig.WriteString("IdentitiesOnly=yes"); err != nil {
+	if _, err := sshConfig.WriteString(sshConfigContent); err != nil {
 		Fail(fmt.Sprintf("failed to write ssh config: %q", err))
 	}
 	if err := sshConfig.Close(); err != nil {

@@ -1,0 +1,21 @@
+From: Reinhard Tartler <siretart@tauware.de>
+Date: Thu, 3 Oct 2024 07:18:40 -0400
+Subject: test/system: Skip some system tests that fail in Debian
+
+---
+ test/system/125-import.bats | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/test/system/125-import.bats b/test/system/125-import.bats
+index 75409e7..7fbb126 100644
+--- a/test/system/125-import.bats
++++ b/test/system/125-import.bats
+@@ -47,7 +47,7 @@ load helpers
+ }
+ 
+ # Integration tag to catch future breakage in tar, e.g. #19407
+-# bats test_tags=distro-integration, ci:parallel
++# bats test_tags=distro-integration, debian_ignore, ci:parallel
+ @test "podman export, alter tarball, re-import" {
+     # FIXME: #21373 - tar < 1.35 is broken.
+     # Remove this skip once all VMs are updated to 1.35.2 or above
