@@ -9,8 +9,10 @@ import (
 
 	"github.com/containers/common/libnetwork/types"
 	"github.com/containers/common/pkg/cgroups"
+	"github.com/containers/common/pkg/config"
 	"github.com/containers/podman/v5/libpod/define"
 	"github.com/containers/podman/v5/pkg/namespaces"
+	"github.com/containers/podman/v5/pkg/rootless"
 	"github.com/containers/podman/v5/pkg/util"
 	"github.com/containers/storage/pkg/fileutils"
 	"github.com/containers/storage/pkg/unshare"
@@ -55,7 +57,7 @@ const (
 	// Pasta indicates that a pasta network stack should be used.
 	// Only used with the network namespace, invalid otherwise.
 	Pasta NamespaceMode = "pasta"
-	// KeepId indicates a user namespace to keep the owner uid inside
+	// KeepID indicates a user namespace to keep the owner uid inside
 	// of the namespace itself.
 	// Only used with the user namespace, invalid otherwise.
 	KeepID NamespaceMode = "keep-id"
@@ -333,14 +335,18 @@ func ParseUserNamespace(ns string) (Namespace, error) {
 // If the input is nil or empty it will use the default setting from containers.conf
 func ParseNetworkFlag(networks []string) (Namespace, map[string]types.PerNetworkOptions, map[string][]string, error) {
 	var networkOptions map[string][]string
+	toReturn := Namespace{}
 	// by default we try to use the containers.conf setting
 	// if we get at least one value use this instead
-	ns := containerConfig.Containers.NetNS
+	cfg, err := config.Default()
+	if err != nil {
+		return toReturn, nil, nil, err
+	}
+	ns := cfg.Containers.NetNS
 	if len(networks) > 0 {
 		ns = networks[0]
 	}
 
-	toReturn := Namespace{}
 	podmanNetworks := make(map[string]types.PerNetworkOptions)
 
 	switch {
@@ -477,7 +483,10 @@ func parseBridgeNetworkOptions(opts string) (types.PerNetworkOptions, error) {
 			netOpts.InterfaceName = value
 
 		default:
-			return netOpts, fmt.Errorf("unknown bridge network option: %s", name)
+			if netOpts.Options == nil {
+				netOpts.Options = make(map[string]string)
+			}
+			netOpts.Options[name] = value
 		}
 	}
 	return netOpts, nil
@@ -505,6 +514,9 @@ func SetupUserNS(idmappings *storageTypes.IDMappingOptions, userns Namespace, g 
 		opts, err := namespaces.UsernsMode(userns.String()).GetKeepIDOptions()
 		if err != nil {
 			return user, err
+		}
+		if opts.MaxSize != nil && !rootless.IsRootless() {
+			return user, fmt.Errorf("cannot set max size for user namespace when not running rootless")
 		}
 		mappings, uid, gid, err := util.GetKeepIDMapping(opts)
 		if err != nil {

@@ -1,3 +1,7 @@
+podman-artifact-add.1.md
+podman-artifact-ls.1.md
+podman-artifact-pull.1.md
+podman-artifact-push.1.md
 podman-attach.1.md
 podman-auto-update.1.md
 podman-build.1.md
@@ -58,6 +62,8 @@ podman-start.1.md
 podman-stats.1.md
 podman-stop.1.md
 podman-top.1.md
+podman-troubleshooting.7.md
+podman-rootless.7.md
 podman-unmount.1.md
 podman-unpause.1.md
 podman-update.1.md

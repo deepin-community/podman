@@ -15,7 +15,6 @@ import (
 	"github.com/containers/podman/v5/pkg/errorhandling"
 	"github.com/containers/podman/v5/pkg/machine/connection"
 	"github.com/containers/podman/v5/pkg/machine/define"
-	"github.com/containers/podman/v5/pkg/machine/env"
 	"github.com/containers/podman/v5/pkg/machine/lock"
 	"github.com/containers/podman/v5/pkg/machine/ports"
 	"github.com/containers/storage/pkg/fileutils"
@@ -153,7 +152,7 @@ func (mc *MachineConfig) updateLastBoot() error { //nolint:unused
 	return mc.Write()
 }
 
-func (mc *MachineConfig) Remove(saveIgnition, saveImage bool) ([]string, func() error, error) {
+func (mc *MachineConfig) Remove(machines map[string]bool, saveIgnition, saveImage bool) ([]string, func() error, error) {
 	ignitionFile, err := mc.IgnitionFile()
 	if err != nil {
 		return nil, nil, err
@@ -195,7 +194,7 @@ func (mc *MachineConfig) Remove(saveIgnition, saveImage bool) ([]string, func() 
 
 	mcRemove := func() error {
 		var errs []error
-		if err := connection.RemoveConnections(mc.Name, mc.Name+"-root"); err != nil {
+		if err := connection.RemoveConnections(machines, mc.Name, mc.Name+"-root"); err != nil {
 			errs = append(errs, err)
 		}
 
@@ -304,24 +303,6 @@ func (mc *MachineConfig) LogFile() (*define.VMFile, error) {
 	return rtDir.AppendToNewVMFile(mc.Name+".log", nil)
 }
 
-func (mc *MachineConfig) Kind() (define.VMType, error) {
-	// Not super in love with this approach
-	if mc.QEMUHypervisor != nil {
-		return define.QemuVirt, nil
-	}
-	if mc.AppleHypervisor != nil {
-		return define.AppleHvVirt, nil
-	}
-	if mc.HyperVHypervisor != nil {
-		return define.HyperVVirt, nil
-	}
-	if mc.WSLHypervisor != nil {
-		return define.WSLVirt, nil
-	}
-
-	return define.UnknownVirt, nil
-}
-
 func (mc *MachineConfig) IsFirstBoot() (bool, error) {
 	never, err := time.Parse(time.RFC3339, "0001-01-01T00:00:00Z")
 	if err != nil {
@@ -331,19 +312,8 @@ func (mc *MachineConfig) IsFirstBoot() (bool, error) {
 }
 
 func (mc *MachineConfig) ConnectionInfo(vmtype define.VMType) (*define.VMFile, *define.VMFile, error) {
-	var (
-		socket *define.VMFile
-		pipe   *define.VMFile
-	)
-
-	if vmtype == define.HyperVVirt || vmtype == define.WSLVirt {
-		pipeName := env.WithPodmanPrefix(mc.Name)
-		pipe = &define.VMFile{Path: `\\.\pipe\` + pipeName}
-		return nil, pipe, nil
-	}
-
 	socket, err := mc.APISocket()
-	return socket, nil, err
+	return socket, getPipe(mc.Name), err
 }
 
 // LoadMachineByName returns a machine config based on the vm name and provider

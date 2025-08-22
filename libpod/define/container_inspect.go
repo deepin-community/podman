@@ -57,10 +57,20 @@ type InspectContainerConfig struct {
 	Annotations map[string]string `json:"Annotations"`
 	// Container stop signal
 	StopSignal string `json:"StopSignal"`
+	// Configured startup healthcheck for the container
+	StartupHealthCheck *StartupHealthCheck `json:"StartupHealthCheck,omitempty"`
 	// Configured healthcheck for the container
 	Healthcheck *manifest.Schema2HealthConfig `json:"Healthcheck,omitempty"`
 	// HealthcheckOnFailureAction defines an action to take once the container turns unhealthy.
 	HealthcheckOnFailureAction string `json:"HealthcheckOnFailureAction,omitempty"`
+	// HealthLogDestination defines the destination where the log is stored
+	HealthLogDestination string `json:"HealthLogDestination,omitempty"`
+	// HealthMaxLogCount is maximum number of attempts in the HealthCheck log file.
+	// ('0' value means an infinite number of attempts in the log file)
+	HealthMaxLogCount uint `json:"HealthcheckMaxLogCount,omitempty"`
+	// HealthMaxLogSize is the maximum length in characters of stored HealthCheck log
+	// ("0" value means an infinite log length)
+	HealthMaxLogSize uint `json:"HealthcheckMaxLogSize,omitempty"`
 	// CreateCommand is the full command plus arguments of the process the
 	// container has been created with.
 	CreateCommand []string `json:"CreateCommand,omitempty"`
@@ -89,6 +99,8 @@ type InspectContainerConfig struct {
 	SdNotifyMode string `json:"sdNotifyMode,omitempty"`
 	// SdNotifySocket is the NOTIFY_SOCKET in use by/configured for the container.
 	SdNotifySocket string `json:"sdNotifySocket,omitempty"`
+	// ExposedPorts includes ports the container has exposed.
+	ExposedPorts map[string]struct{} `json:"ExposedPorts,omitempty"`
 
 	// V4PodmanCompatMarshal indicates that the json marshaller should
 	// use the old v4 inspect format to keep API compatibility.
@@ -273,6 +285,9 @@ type InspectMount struct {
 	// Mount propagation for the mount. Can be empty if not specified, but
 	// is always printed - no omitempty.
 	Propagation string `json:"Propagation"`
+	// SubPath object from the volume. Specified as a path within
+	// the source volume to be mounted at the Destination.
+	SubPath string `json:"SubPath,omitempty"`
 }
 
 // InspectContainerState provides a detailed record of a container's current
@@ -390,6 +405,11 @@ type InspectContainerHostConfig struct {
 	// It is not handled directly within libpod and is stored in an
 	// annotation.
 	AutoRemove bool `json:"AutoRemove"`
+	// AutoRemoveImage is whether the container's image will be
+	// automatically removed on exiting.
+	// It is not handled directly within libpod and is stored in an
+	// annotation.
+	AutoRemoveImage bool `json:"AutoRemoveImage"`
 	// Annotations are provided to the runtime when the container is
 	// started.
 	Annotations map[string]string `json:"Annotations"`
@@ -423,6 +443,8 @@ type InspectContainerHostConfig struct {
 	// ExtraHosts contains hosts that will be added to the container's
 	// /etc/hosts.
 	ExtraHosts []string `json:"ExtraHosts"`
+	// HostsFile is the base file to create the `/etc/hosts` file inside the container.
+	HostsFile string `json:"HostsFile"`
 	// GroupAdd contains groups that the user inside the container will be
 	// added to.
 	GroupAdd []string `json:"GroupAdd"`
@@ -776,6 +798,8 @@ type InspectContainerData struct {
 	LockNumber              uint32                      `json:"lockNumber"`
 	Config                  *InspectContainerConfig     `json:"Config"`
 	HostConfig              *InspectContainerHostConfig `json:"HostConfig"`
+	UseImageHosts           bool                        `json:"UseImageHosts"`
+	UseImageHostname        bool                        `json:"UseImageHostname"`
 }
 
 // InspectExecSession contains information about a given exec session.

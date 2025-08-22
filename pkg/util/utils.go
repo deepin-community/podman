@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
-	"github.com/containers/common/pkg/config"
 	"github.com/containers/image/v5/types"
 	"github.com/containers/podman/v5/libpod/define"
 	"github.com/containers/podman/v5/pkg/errorhandling"
@@ -41,17 +40,6 @@ type idMapFlags struct {
 	Extends  bool // The "+" flag
 	UserMap  bool // The "u" flag
 	GroupMap bool // The "g" flag
-}
-
-var containerConfig *config.Config
-
-func init() {
-	var err error
-	containerConfig, err = config.Default()
-	if err != nil {
-		logrus.Error(err)
-		os.Exit(1)
-	}
 }
 
 // Helper function to determine the username/password passed
@@ -84,7 +72,7 @@ func ParseDockerignore(containerfiles []string, root string) ([]string, string, 
 		// does not attempts to re-resolve it
 		ignoreFile = path
 		ignore, dockerIgnoreErr = os.ReadFile(path)
-		if os.IsNotExist(dockerIgnoreErr) {
+		if errors.Is(dockerIgnoreErr, fs.ErrNotExist) {
 			// In this case either ignorefile was not found
 			// or it is a symlink to unexpected file in such
 			// case manually set ignorefile to `/dev/null` so
@@ -185,7 +173,7 @@ func ParseSignal(rawSignal string) (syscall.Signal, error) {
 	return sig, nil
 }
 
-func getRootlessKeepIDMapping(uid, gid int, uids, gids []idtools.IDMap) (*stypes.IDMappingOptions, int, int, error) {
+func getRootlessKeepIDMapping(uid, gid int, uids, gids []idtools.IDMap, maxSize int) (*stypes.IDMappingOptions, int, int, error) {
 	options := stypes.IDMappingOptions{
 		HostUIDMapping: false,
 		HostGIDMapping: false,
@@ -196,6 +184,11 @@ func getRootlessKeepIDMapping(uid, gid int, uids, gids []idtools.IDMap) (*stypes
 	}
 	for _, g := range gids {
 		maxGID += g.Size
+	}
+	if maxSize > 0 {
+		// If maxSize is set, we need to ensure that the mappings are within the available range
+		maxUID = min(maxUID, maxSize-1)
+		maxGID = min(maxGID, maxSize-1)
 	}
 
 	options.UIDMap, options.GIDMap = nil, nil
@@ -252,13 +245,17 @@ func GetKeepIDMapping(opts *namespaces.KeepIDUserNsOptions) (*stypes.IDMappingOp
 	if opts.GID != nil {
 		gid = int(*opts.GID)
 	}
+	maxSize := 0
+	if opts.MaxSize != nil {
+		maxSize = int(*opts.MaxSize)
+	}
 
 	uids, gids, err := rootless.GetConfiguredMappings(true)
 	if err != nil {
 		return nil, -1, -1, fmt.Errorf("cannot read mappings: %w", err)
 	}
 
-	return getRootlessKeepIDMapping(uid, gid, uids, gids)
+	return getRootlessKeepIDMapping(uid, gid, uids, gids, maxSize)
 }
 
 // GetNoMapMapping returns the mappings and the user to use when nomap is used
@@ -1223,10 +1220,6 @@ func ValidateSysctls(strSlice []string) (map[string]string, error) {
 		}
 	}
 	return sysctl, nil
-}
-
-func DefaultContainerConfig() *config.Config {
-	return containerConfig
 }
 
 func CreateIDFile(path string, id string) error {

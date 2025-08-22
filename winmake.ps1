@@ -39,7 +39,7 @@ function Win-SSHProxy {
 
     New-Item -ItemType Directory -Force -Path "./bin/windows"
     if (-Not $Version) {
-        $Version = "v0.7.2"
+        $Version = "v0.8.4"
     }
     curl.exe -sSL -o "./bin/windows/gvproxy.exe" --retry 5 "https://github.com/containers/gvisor-tap-vsock/releases/download/$Version/gvproxy-windowsgui.exe"
     curl.exe -sSL -o "./bin/windows/win-sshproxy.exe" --retry 5 "https://github.com/containers/gvisor-tap-vsock/releases/download/$Version/win-sshproxy.exe"
@@ -114,12 +114,9 @@ function Test-Installer{
     }
 
     $command = "$PSScriptRoot\contrib\win-installer\test-installer.ps1"
-    $command += " -operation all"
+    $command += " -scenario all"
     $command += " -provider $provider"
     $command += " -setupExePath $setupExePath"
-    $command += " -installWSL:`$false"
-    $command += " -installHyperV:`$false"
-    $command += " -skipWinVersionCheck:`$true"
     Run-Command "${command}"
 }
 
@@ -187,8 +184,8 @@ function Lint{
         Exit 1
     }
 
-    Run-Command "golangci-lint run --timeout=10m --build-tags=`"$remotetags`" $PSScriptRoot\cmd\podman"
     Run-Command "pre-commit run --all-files"
+    Run-Command "golangci-lint run --timeout=10m --build-tags=`"$remotetags`" $PSScriptRoot\cmd\podman"
 }
 
 # Helpers
@@ -205,7 +202,7 @@ function Build-Ginkgo{
 function Git-Commit{
     # git is not installed by default on windows,
     # so if we can't get the commit, we don't include this info
-    Get-Command git  -ErrorAction SilentlyContinue  | out-null
+    Get-Command git  -ErrorAction SilentlyContinue | out-null
     if(!$?){
         return
     }
@@ -249,11 +246,7 @@ function Build-Distribution-Zip-File{
 function Get-Podman-Version{
     $versionSrc = "$PSScriptRoot\test\version\"
     $versionBin = "$PSScriptRoot\test\version\version.exe"
-
-    # If version.exe doesn't exist, build it
-    if (-Not (Test-Path -Path "$versionBin" -PathType Leaf)) {
-        Run-Command "go build --o `"$versionBin`" `"$versionSrc`""
-    }
+    Run-Command "go build --o `"$versionBin`" `"$versionSrc`""
     $version = Invoke-Expression "$versionBin"
     # Remove the '-dev' suffix from the version
     $version = $version -replace "-.*", ""
@@ -282,10 +275,14 @@ switch ($target) {
         if ($args.Count -gt 1) {
             $ref = $args[1]
         }
-        Win-SSHProxy -Ref $ref
+        Win-SSHProxy($ref)
     }
     'installer' {
-        Installer
+        if ($args.Count -gt 1) {
+            Installer -version $args[1]
+        } else {
+            Installer
+        }
     }
     'installertest' {
         if ($args.Count -gt 1) {
@@ -322,7 +319,7 @@ switch ($target) {
         Write-Host " .\winmake installer"
         Write-Host
         Write-Host "Example: Run windows installer tests"
-        Write-Host " .\winmake installertest"
+        Write-Host " .\winmake installertest hyperv"
         Write-Host
         Write-Host "Example: Generate the documetation artifacts"
         Write-Host " .\winmake docs"

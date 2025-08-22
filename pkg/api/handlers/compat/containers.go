@@ -535,19 +535,6 @@ func LibpodToContainerJSON(l *libpod.Container, sz bool) (*types.ContainerJSON, 
 	}
 	stopTimeout := int(l.StopTimeout())
 
-	exposedPorts := make(nat.PortSet)
-	for ep := range inspect.NetworkSettings.Ports {
-		port, proto, ok := strings.Cut(ep, "/")
-		if !ok {
-			return nil, fmt.Errorf("PORT/PROTOCOL Format required for %q", ep)
-		}
-		exposedPort, err := nat.NewPort(proto, port)
-		if err != nil {
-			return nil, err
-		}
-		exposedPorts[exposedPort] = struct{}{}
-	}
-
 	var healthcheck *container.HealthConfig
 	if inspect.Config.Healthcheck != nil {
 		healthcheck = &container.HealthConfig{
@@ -556,6 +543,16 @@ func LibpodToContainerJSON(l *libpod.Container, sz bool) (*types.ContainerJSON, 
 			Timeout:     inspect.Config.Healthcheck.Timeout,
 			StartPeriod: inspect.Config.Healthcheck.StartPeriod,
 			Retries:     inspect.Config.Healthcheck.Retries,
+		}
+	}
+
+	// Apparently the compiler can't convert a map[string]struct{} into a nat.PortSet
+	// (Despite a nat.PortSet being that exact struct with some types added)
+	var exposedPorts nat.PortSet
+	if len(inspect.Config.ExposedPorts) > 0 {
+		exposedPorts = make(nat.PortSet)
+		for p := range inspect.Config.ExposedPorts {
+			exposedPorts[nat.Port(p)] = struct{}{}
 		}
 	}
 
@@ -789,7 +786,7 @@ func UpdateContainer(w http.ResponseWriter, r *http.Request) {
 		restartRetries = &localRetries
 	}
 
-	if err := ctr.Update(resources, restartPolicy, restartRetries); err != nil {
+	if err := ctr.Update(resources, restartPolicy, restartRetries, &define.UpdateHealthCheckConfig{}); err != nil {
 		utils.Error(w, http.StatusInternalServerError, fmt.Errorf("updating container: %w", err))
 		return
 	}

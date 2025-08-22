@@ -1,7 +1,6 @@
 cni/87-podman-bridge.conflist      /etc/cni/net.d/
 completions/fish/podman.fish       /usr/share/fish/vendor_completions.d
 completions/zsh/_podman            /usr/share/zsh/vendor-completions
-debian/etc/containers/libpod.conf  /etc/containers/
 usr/bin/podman                     /usr/bin
 usr/bin/podman-testing             /usr/libexec/podman/
 usr/bin/quadlet                    /usr/libexec/podman/

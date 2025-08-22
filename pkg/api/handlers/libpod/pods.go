@@ -48,6 +48,9 @@ func PodCreate(w http.ResponseWriter, r *http.Request) {
 		infraOptions.Net = &entities.NetOptions{}
 		infraOptions.Devices = psg.Devices
 		infraOptions.SecurityOpt = psg.SecurityOpt
+		if !psg.Userns.IsDefault() {
+			infraOptions.UserNS = psg.Userns.String()
+		}
 		if psg.ShareParent == nil {
 			t := true
 			psg.ShareParent = &t
@@ -70,7 +73,6 @@ func PodCreate(w http.ResponseWriter, r *http.Request) {
 		// a few extra that do not have the same json tags
 		psg.InfraContainerSpec.Name = psg.InfraName
 		psg.InfraContainerSpec.ConmonPidFile = psg.InfraConmonPidFile
-		psg.InfraContainerSpec.ContainerCreateCommand = psg.InfraCommand
 		psg.InfraContainerSpec.Image = psg.InfraImage
 		psg.InfraContainerSpec.RawImageName = psg.InfraImage
 	}

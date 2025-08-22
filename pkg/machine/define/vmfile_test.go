@@ -55,9 +55,7 @@ func TestNewMachineFile(t *testing.T) {
 
 	homedir := t.TempDir()
 	longTemp := t.TempDir()
-	oldhome := os.Getenv("HOME")
-	os.Setenv("HOME", homedir) //nolint: tenv
-	defer os.Setenv("HOME", oldhome)
+	t.Setenv("HOME", homedir)
 
 	p := "/var/tmp/podman/my.sock"
 	longp := filepath.Join(longTemp, utils.RandomString(100), "my.sock")
@@ -119,7 +117,6 @@ func TestNewMachineFile(t *testing.T) {
 		},
 	}
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := NewMachineFile(tt.args.path, tt.args.symlink)
 			if (err != nil) != tt.wantErr {

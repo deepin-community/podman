@@ -153,6 +153,10 @@ func (c *Container) oomFilePath() (string, error) {
 	return c.ociRuntime.OOMFilePath(c)
 }
 
+func (c *Container) persistDirPath() (string, error) {
+	return c.ociRuntime.PersistDirectoryPath(c)
+}
+
 // Wait for the container's exit file to appear.
 // When it does, update our state based on it.
 func (c *Container) waitForExitFileAndSync() error {
@@ -766,13 +770,15 @@ func (c *Container) removeConmonFiles() error {
 		return fmt.Errorf("removing container %s exit file: %w", c.ID(), err)
 	}
 
-	// Remove the oom file
-	oomFile, err := c.oomFilePath()
+	// Remove the persist directory
+	persistDir, err := c.persistDirPath()
 	if err != nil {
 		return err
 	}
-	if err := os.Remove(oomFile); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("removing container %s oom file: %w", c.ID(), err)
+	if persistDir != "" {
+		if err := os.RemoveAll(persistDir); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("removing container %s persist directory: %w", c.ID(), err)
+		}
 	}
 
 	return nil
@@ -1123,10 +1129,9 @@ func (c *Container) init(ctx context.Context, retainRetries bool) error {
 	// bugzilla.redhat.com/show_bug.cgi?id=2144754:
 	// In case of a restart, make sure to remove the healthcheck log to
 	// have a clean state.
-	if path := c.healthCheckLogPath(); path != "" {
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			logrus.Error(err)
-		}
+	err = c.writeHealthCheckLog(define.HealthCheckResults{Status: define.HealthCheckReset})
+	if err != nil {
+		return err
 	}
 
 	if err := c.save(); err != nil {
@@ -1925,6 +1930,11 @@ func (c *Container) mountNamedVolume(v *ContainerNamedVolume, mountpoint string)
 			getOptions := copier.GetOptions{
 				KeepDirectoryNames: false,
 			}
+			// If the volume is idmapped, we need to "undo" the idmapping
+			if slices.Contains(v.Options, "idmap") {
+				getOptions.UIDMap = c.config.IDMappings.UIDMap
+				getOptions.GIDMap = c.config.IDMappings.GIDMap
+			}
 			errChan <- copier.Get(srcDir, "", getOptions, []string{"/."}, writer)
 		}()
 
@@ -1932,6 +1942,8 @@ func (c *Container) mountNamedVolume(v *ContainerNamedVolume, mountpoint string)
 		// the volume.
 		copyOpts := copier.PutOptions{}
 		if err := copier.Put(volMount, "", copyOpts, reader); err != nil {
+			// consume the reader otherwise the goroutine will block
+			_, _ = io.Copy(io.Discard, reader)
 			err2 := <-errChan
 			if err2 != nil {
 				logrus.Errorf("Streaming contents of container %s directory for volume copy-up: %v", c.ID(), err2)
@@ -2049,6 +2061,11 @@ func (c *Container) cleanup(ctx context.Context) error {
 
 	logrus.Debugf("Cleaning up container %s", c.ID())
 
+	// Ensure we are not killed half way through cleanup
+	// which can leave us in a bad state.
+	shutdown.Inhibit()
+	defer shutdown.Uninhibit()
+
 	// Remove healthcheck unit/timer file if it execs
 	if c.config.HealthCheckConfig != nil {
 		if err := c.removeTransientFiles(ctx,
@@ -2151,6 +2168,11 @@ func (c *Container) stopPodIfNeeded(ctx context.Context) error {
 		return nil
 	}
 
+	// Never try to stop the pod when a init container stopped
+	if c.IsInitCtr() {
+		return nil
+	}
+
 	pod, err := c.runtime.state.Pod(c.config.Pod)
 	if err != nil {
 		return fmt.Errorf("container %s is in pod %s, but pod cannot be retrieved: %w", c.ID(), c.config.Pod, err)
@@ -2210,7 +2232,6 @@ func (c *Container) postDeleteHooks(ctx context.Context) error {
 				return err
 			}
 			for i, hook := range extensionHooks {
-				hook := hook
 				logrus.Debugf("container %s: invoke poststop hook %d, path %s", c.ID(), i, hook.Path)
 				var stderr, stdout bytes.Buffer
 				hookErr, err := exec.RunWithOptions(
@@ -2377,7 +2398,7 @@ func (c *Container) setupOCIHooks(ctx context.Context, config *spec.Spec) (map[s
 // the container's mountpoint directly from the storage.
 // Otherwise, it returns an intermediate mountpoint that is accessible to anyone.
 func (c *Container) getRootPathForOCI() (string, error) {
-	if hasCurrentUserMapped(c) {
+	if hasCurrentUserMapped(c) || c.config.RootfsMapping != nil {
 		return c.state.Mountpoint, nil
 	}
 	return c.getIntermediateMountpointUser()
@@ -2659,7 +2680,12 @@ func (c *Container) update(resources *spec.LinuxResources, restartPolicy *string
 		return fmt.Errorf("must provide restart policy if updating restart retries: %w", define.ErrInvalidArg)
 	}
 
-	oldResources := c.config.Spec.Linux.Resources
+	oldResources := new(spec.LinuxResources)
+	if c.config.Spec.Linux.Resources != nil {
+		if err := JSONDeepCopy(c.config.Spec.Linux.Resources, oldResources); err != nil {
+			return err
+		}
+	}
 	oldRestart := c.config.RestartPolicy
 	oldRetries := c.config.RestartRetries
 
@@ -2686,7 +2712,15 @@ func (c *Container) update(resources *spec.LinuxResources, restartPolicy *string
 		if c.config.Spec.Linux == nil {
 			c.config.Spec.Linux = new(spec.Linux)
 		}
-		c.config.Spec.Linux.Resources = resources
+
+		resourcesToUpdate, err := json.Marshal(resources)
+		if err != nil {
+			return err
+		}
+		if err := json.Unmarshal(resourcesToUpdate, c.config.Spec.Linux.Resources); err != nil {
+			return err
+		}
+		resources = c.config.Spec.Linux.Resources
 	}
 
 	if err := c.runtime.state.SafeRewriteContainerConfig(c, "", "", c.config); err != nil {
@@ -2718,8 +2752,123 @@ func (c *Container) update(resources *spec.LinuxResources, restartPolicy *string
 	}
 
 	logrus.Debugf("updated container %s", c.ID())
+	return nil
+}
 
-	c.newContainerEvent(events.Update)
+func (c *Container) resetHealthCheckTimers(noHealthCheck bool, changedTimer bool, wasEnabledHealthCheck bool, isStartup bool) error {
+	if !c.ensureState(define.ContainerStateCreated, define.ContainerStateRunning, define.ContainerStatePaused) {
+		return nil
+	}
+	if noHealthCheck {
+		if err := c.removeTransientFiles(context.Background(),
+			c.config.StartupHealthCheckConfig != nil && !c.state.StartupHCPassed,
+			c.state.HCUnitName); err != nil {
+			return err
+		}
+		return nil
+	}
 
+	if !changedTimer {
+		return nil
+	}
+
+	if !isStartup {
+		if c.state.StartupHCPassed || c.config.StartupHealthCheckConfig == nil {
+			c.recreateHealthCheckTimer(context.Background(), false, false)
+		}
+		return nil
+	}
+
+	if !c.state.StartupHCPassed {
+		c.state.StartupHCPassed = !wasEnabledHealthCheck
+		c.state.StartupHCSuccessCount = 0
+		c.state.StartupHCFailureCount = 0
+		if err := c.save(); err != nil {
+			return err
+		}
+		if wasEnabledHealthCheck {
+			c.recreateHealthCheckTimer(context.Background(), true, true)
+		}
+		return nil
+	}
+	return nil
+}
+
+func (c *Container) updateHealthCheck(newHealthCheckConfig IHealthCheckConfig, currentHealthCheckConfig IHealthCheckConfig) error {
+	oldHealthCheckConfig := currentHealthCheckConfig
+	if !oldHealthCheckConfig.IsNil() {
+		if err := JSONDeepCopy(currentHealthCheckConfig, oldHealthCheckConfig); err != nil {
+			return err
+		}
+	}
+
+	newHealthCheckConfig.SetTo(c.config)
+
+	if err := c.runtime.state.SafeRewriteContainerConfig(c, "", "", c.config); err != nil {
+		// Assume DB write failed, revert to old resources block
+		oldHealthCheckConfig.SetTo(c.config)
+		return err
+	}
+
+	oldInterval := time.Duration(0)
+	if !oldHealthCheckConfig.IsNil() {
+		oldInterval = oldHealthCheckConfig.GetInterval()
+	}
+
+	changedTimer := false
+	if !newHealthCheckConfig.IsNil() {
+		changedTimer = newHealthCheckConfig.IsTimeChanged(oldInterval)
+	}
+
+	noHealthCheck := c.config.HealthCheckConfig != nil && slices.Contains(c.config.HealthCheckConfig.Test, "NONE")
+
+	if err := c.resetHealthCheckTimers(noHealthCheck, changedTimer, !oldHealthCheckConfig.IsNil(), newHealthCheckConfig.IsStartup()); err != nil {
+		return err
+	}
+
+	checkType := "HealthCheck"
+	if newHealthCheckConfig.IsStartup() {
+		checkType = "Startup HealthCheck"
+	}
+	logrus.Debugf("%s configuration updated for container %s", checkType, c.ID())
+	return nil
+}
+
+func (c *Container) updateGlobalHealthCheckConfiguration(globalOptions define.GlobalHealthCheckOptions) error {
+	oldHealthCheckOnFailureAction := c.config.HealthCheckOnFailureAction
+	oldHealthLogDestination := c.config.HealthLogDestination
+	oldHealthMaxLogCount := c.config.HealthMaxLogCount
+	oldHealthMaxLogSize := c.config.HealthMaxLogSize
+
+	if globalOptions.HealthCheckOnFailureAction != nil {
+		c.config.HealthCheckOnFailureAction = *globalOptions.HealthCheckOnFailureAction
+	}
+
+	if globalOptions.HealthMaxLogCount != nil {
+		c.config.HealthMaxLogCount = globalOptions.HealthMaxLogCount
+	}
+
+	if globalOptions.HealthMaxLogSize != nil {
+		c.config.HealthMaxLogSize = globalOptions.HealthMaxLogSize
+	}
+
+	if globalOptions.HealthLogDestination != nil {
+		dest, err := define.GetValidHealthCheckDestination(*globalOptions.HealthLogDestination)
+		if err != nil {
+			return err
+		}
+		c.config.HealthLogDestination = &dest
+	}
+
+	if err := c.runtime.state.SafeRewriteContainerConfig(c, "", "", c.config); err != nil {
+		// Assume DB write failed, revert to old resources block
+		c.config.HealthCheckOnFailureAction = oldHealthCheckOnFailureAction
+		c.config.HealthLogDestination = oldHealthLogDestination
+		c.config.HealthMaxLogCount = oldHealthMaxLogCount
+		c.config.HealthMaxLogSize = oldHealthMaxLogSize
+		return err
+	}
+
+	logrus.Debugf("Global HealthCheck configuration updated for container %s", c.ID())
 	return nil
 }

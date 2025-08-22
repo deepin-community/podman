@@ -24,7 +24,7 @@ if ($Env:TEST_FLAVOR -eq "machine-wsl") {
 Write-Host "    CONTAINERS_MACHINE_PROVIDER = $Env:CONTAINERS_MACHINE_PROVIDER"
 Write-Host "`n"
 
-# The repo.tbz artifact was extracted here
+# The repo.tar.zst artifact was extracted here
 Set-Location "$ENV:CIRRUS_WORKING_DIR\repo"
 # Tests hard-code this location for podman-remote binary, make sure it actually runs.
 Run-Command ".\bin\windows\podman.exe --version"
@@ -32,6 +32,13 @@ Run-Command ".\bin\windows\podman.exe --version"
 # Add policy.json to filesystem for podman machine pulls
 New-Item -ItemType "directory" -Path "$env:AppData\containers"
 Copy-Item -Path pkg\machine\ocipull\policy.json -Destination "$env:AppData\containers"
+
+# Set TMPDIR to fast storage, see cirrus.yml setup_disk_script for setup Z:\
+# TMPDIR is used by the machine tests paths, while TMP and TEMP are the normal
+# windows temporary dirs. Just to ensure everything uses the fast disk.
+$Env:TMPDIR = 'Z:\'
+$Env:TMP = 'Z:\'
+$Env:TEMP = 'Z:\'
 
 Write-Host "`nRunning podman-machine e2e tests"
 Run-Command ".\winmake localmachine"

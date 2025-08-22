@@ -15,16 +15,9 @@ import (
 	"time"
 
 	"github.com/containers/podman/v5/libpod/define"
+	"github.com/containers/podman/v5/libpod/shutdown"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
-)
-
-const (
-	// MaxHealthCheckNumberLogs is the maximum number of attempts we keep
-	// in the healthcheck history file
-	MaxHealthCheckNumberLogs int = 5
-	// MaxHealthCheckLogLength in characters
-	MaxHealthCheckLogLength = 500
 )
 
 // HealthCheck verifies the state and validity of the healthcheck configuration
@@ -143,8 +136,8 @@ func (c *Container) runHealthCheck(ctx context.Context, isStartup bool) (define.
 	}
 
 	eventLog := output.String()
-	if len(eventLog) > MaxHealthCheckLogLength {
-		eventLog = eventLog[:MaxHealthCheckLogLength]
+	if c.HealthCheckMaxLogSize() != 0 && len(eventLog) > int(c.HealthCheckMaxLogSize()) {
+		eventLog = eventLog[:c.HealthCheckMaxLogSize()]
 	}
 
 	if timeEnd.Sub(timeStart) > c.HealthCheckConfig().Timeout {
@@ -154,21 +147,22 @@ func (c *Container) runHealthCheck(ctx context.Context, isStartup bool) (define.
 	}
 
 	hcl := newHealthCheckLog(timeStart, timeEnd, returnCode, eventLog)
-	logStatus, err := c.updateHealthCheckLog(hcl, inStartPeriod, isStartup)
+
+	healthCheckResult, err := c.updateHealthCheckLog(hcl, inStartPeriod, isStartup)
 	if err != nil {
-		return hcResult, "", fmt.Errorf("unable to update health check log %s for %s: %w", c.healthCheckLogPath(), c.ID(), err)
+		return hcResult, "", fmt.Errorf("unable to update health check log %s for %s: %w", c.getHealthCheckLogDestination(), c.ID(), err)
 	}
 
 	// Write HC event with appropriate status as the last thing before we
 	// return.
 	if hcResult == define.HealthCheckNotDefined || hcResult == define.HealthCheckInternalError {
-		return hcResult, logStatus, hcErr
+		return hcResult, healthCheckResult.Status, hcErr
 	}
 	if c.runtime.config.Engine.HealthcheckEvents {
-		c.newContainerHealthCheckEvent(logStatus)
+		c.newContainerHealthCheckEvent(healthCheckResult)
 	}
 
-	return hcResult, logStatus, hcErr
+	return hcResult, healthCheckResult.Status, hcErr
 }
 
 func (c *Container) processHealthCheckStatus(status string) error {
@@ -264,26 +258,42 @@ func (c *Container) incrementStartupHCSuccessCounter(ctx context.Context) {
 	}
 
 	if recreateTimer {
-		logrus.Infof("Startup healthcheck for container %s passed, recreating timer", c.ID())
-
-		oldUnit := c.state.HCUnitName
-		// Create the new, standard healthcheck timer first.
-		if err := c.createTimer(c.HealthCheckConfig().Interval.String(), false); err != nil {
-			logrus.Errorf("Error recreating container %s healthcheck: %v", c.ID(), err)
-			return
-		}
-		if err := c.startTimer(false); err != nil {
-			logrus.Errorf("Error restarting container %s healthcheck timer: %v", c.ID(), err)
-		}
-
 		// This kills the process the healthcheck is running.
 		// Which happens to be us.
 		// So this has to be last - after this, systemd serves us a
 		// SIGTERM and we exit.
-		if err := c.removeTransientFiles(ctx, true, oldUnit); err != nil {
-			logrus.Errorf("Error removing container %s healthcheck: %v", c.ID(), err)
-			return
-		}
+		// Special case, via SIGTERM we exit(1) which means systemd logs a failure in the unit.
+		// We do not want this as the unit will be leaked on failure states unless "reset-failed"
+		// is called. Fundamentally this is expected so switch it to exit 0.
+		// NOTE: This is only safe while being called from "podman healthcheck run" which we know
+		// is the case here as we should not alter the exit code of another process that just
+		// happened to call this.
+		shutdown.SetExitCode(0)
+		c.recreateHealthCheckTimer(ctx, false, true)
+	}
+}
+
+func (c *Container) recreateHealthCheckTimer(ctx context.Context, isStartup bool, isStartupRemoved bool) {
+	logrus.Infof("Startup healthcheck for container %s passed, recreating timer", c.ID())
+
+	oldUnit := c.state.HCUnitName
+	// Create the new, standard healthcheck timer first.
+	interval := c.HealthCheckConfig().Interval.String()
+	if isStartup {
+		interval = c.config.StartupHealthCheckConfig.StartInterval.String()
+	}
+
+	if err := c.createTimer(interval, isStartup); err != nil {
+		logrus.Errorf("Error recreating container %s (isStartup: %t) healthcheck: %v", c.ID(), isStartup, err)
+		return
+	}
+	if err := c.startTimer(isStartup); err != nil {
+		logrus.Errorf("Error restarting container %s (isStartup: %t) healthcheck timer: %v", c.ID(), isStartup, err)
+	}
+
+	if err := c.removeTransientFiles(ctx, isStartupRemoved, oldUnit); err != nil {
+		logrus.Errorf("Error removing container %s healthcheck: %v", c.ID(), err)
+		return
 	}
 }
 
@@ -340,16 +350,12 @@ func newHealthCheckLog(start, end time.Time, exitCode int, log string) define.He
 // updateHealthStatus updates the health status of the container
 // in the healthcheck log
 func (c *Container) updateHealthStatus(status string) error {
-	healthCheck, err := c.getHealthCheckLog()
+	healthCheck, err := c.readHealthCheckLog()
 	if err != nil {
 		return err
 	}
 	healthCheck.Status = status
-	newResults, err := json.Marshal(healthCheck)
-	if err != nil {
-		return fmt.Errorf("unable to marshall healthchecks for writing status: %w", err)
-	}
-	return os.WriteFile(c.healthCheckLogPath(), newResults, 0700)
+	return c.writeHealthCheckLog(healthCheck)
 }
 
 // isUnhealthy returns true if the current health check status is unhealthy.
@@ -357,7 +363,7 @@ func (c *Container) isUnhealthy() (bool, error) {
 	if !c.HasHealthCheck() {
 		return false, nil
 	}
-	healthCheck, err := c.getHealthCheckLog()
+	healthCheck, err := c.readHealthCheckLog()
 	if err != nil {
 		return false, err
 	}
@@ -365,7 +371,7 @@ func (c *Container) isUnhealthy() (bool, error) {
 }
 
 // UpdateHealthCheckLog parses the health check results and writes the log
-func (c *Container) updateHealthCheckLog(hcl define.HealthCheckLog, inStartPeriod, isStartup bool) (string, error) {
+func (c *Container) updateHealthCheckLog(hcl define.HealthCheckLog, inStartPeriod, isStartup bool) (define.HealthCheckResults, error) {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
@@ -373,12 +379,12 @@ func (c *Container) updateHealthCheckLog(hcl define.HealthCheckLog, inStartPerio
 	// both failing and succeeding cases to match kube behavior.
 	// So don't update the health check log till the start period is over
 	if _, ok := c.config.Spec.Annotations[define.KubeHealthCheckAnnotation]; ok && inStartPeriod && !isStartup {
-		return "", nil
+		return define.HealthCheckResults{}, nil
 	}
 
-	healthCheck, err := c.getHealthCheckLog()
+	healthCheck, err := c.readHealthCheckLog()
 	if err != nil {
-		return "", err
+		return define.HealthCheckResults{}, err
 	}
 	if hcl.ExitCode == 0 {
 		//	set status to healthy, reset failing state to 0
@@ -398,28 +404,48 @@ func (c *Container) updateHealthCheckLog(hcl define.HealthCheckLog, inStartPerio
 		}
 	}
 	healthCheck.Log = append(healthCheck.Log, hcl)
-	if len(healthCheck.Log) > MaxHealthCheckNumberLogs {
+	if c.HealthCheckMaxLogCount() != 0 && len(healthCheck.Log) > int(c.HealthCheckMaxLogCount()) {
 		healthCheck.Log = healthCheck.Log[1:]
 	}
-	newResults, err := json.Marshal(healthCheck)
+	return healthCheck, c.writeHealthCheckLog(healthCheck)
+}
+
+func (c *Container) witeToFileHealthCheckResults(path string, result define.HealthCheckResults) error {
+	newResults, err := json.Marshal(result)
 	if err != nil {
-		return "", fmt.Errorf("unable to marshall healthchecks for writing: %w", err)
+		return fmt.Errorf("unable to marshall healthchecks for writing: %w", err)
 	}
-	return healthCheck.Status, os.WriteFile(c.healthCheckLogPath(), newResults, 0700)
+	return os.WriteFile(path, newResults, 0700)
 }
 
-// HealthCheckLogPath returns the path for where the health check log is
-func (c *Container) healthCheckLogPath() string {
-	return filepath.Join(filepath.Dir(c.state.RunDir), "healthcheck.log")
+func (c *Container) getHealthCheckLogDestination() string {
+	var destination string
+	switch c.HealthCheckLogDestination() {
+	case define.DefaultHealthCheckLocalDestination, define.HealthCheckEventsLoggerDestination, "":
+		destination = filepath.Join(filepath.Dir(c.state.RunDir), "healthcheck.log")
+	default:
+		destination = filepath.Join(c.HealthCheckLogDestination(), c.ID()+"-healthcheck.log")
+	}
+	return destination
 }
 
-// getHealthCheckLog returns HealthCheck results by reading the container's
+func (c *Container) writeHealthCheckLog(result define.HealthCheckResults) error {
+	return c.witeToFileHealthCheckResults(c.getHealthCheckLogDestination(), result)
+}
+
+// readHealthCheckLog read HealthCheck logs from the path or events_logger
+// The caller should lock the container before this function is called.
+func (c *Container) readHealthCheckLog() (define.HealthCheckResults, error) {
+	return c.readFromFileHealthCheckLog(c.getHealthCheckLogDestination())
+}
+
+// readFromFileHealthCheckLog returns HealthCheck results by reading the container's
 // health check log file.  If the health check log file does not exist, then
 // an empty healthcheck struct is returned
 // The caller should lock the container before this function is called.
-func (c *Container) getHealthCheckLog() (define.HealthCheckResults, error) {
+func (c *Container) readFromFileHealthCheckLog(path string) (define.HealthCheckResults, error) {
 	var healthCheck define.HealthCheckResults
-	b, err := os.ReadFile(c.healthCheckLogPath())
+	b, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			// If the file does not exists just return empty healthcheck and no error.
@@ -428,7 +454,7 @@ func (c *Container) getHealthCheckLog() (define.HealthCheckResults, error) {
 		return healthCheck, fmt.Errorf("failed to read health check log file: %w", err)
 	}
 	if err := json.Unmarshal(b, &healthCheck); err != nil {
-		return healthCheck, fmt.Errorf("failed to unmarshal existing healthcheck results in %s: %w", c.healthCheckLogPath(), err)
+		return healthCheck, fmt.Errorf("failed to unmarshal existing healthcheck results in %s: %w", path, err)
 	}
 	return healthCheck, nil
 }
@@ -454,7 +480,7 @@ func (c *Container) healthCheckStatus() (string, error) {
 		return "", err
 	}
 
-	results, err := c.getHealthCheckLog()
+	results, err := c.readHealthCheckLog()
 	if err != nil {
 		return "", fmt.Errorf("unable to get healthcheck log for %s: %w", c.ID(), err)
 	}

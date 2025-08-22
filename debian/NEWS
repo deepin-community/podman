@@ -1,3 +1,53 @@
+podman (5.4.1+ds1-1) unstable; urgency=medium
+
+ * The podman-restart.service is no longer activated by default. This
+   service is responsible for starting and stopping containers that have
+   been created with the command-line option `--restart=Always`.
+
+   This service used to be activated both on the system and user sessions
+   in previous version of this package, but this leads to issues such as
+   described in #1095048: Logging out of the user session terminates
+   running containers. This is particularily surprising for containers
+   started as root. You may manually re-enable them on your system
+   to restore the previous behavior.
+
+   For having containers and pods managed with systemd and having them
+   started on system boot, podman provides its own concept of "quadlets",
+   which integrates with systemd in a much more natural way. For more
+   details, please consult podman-systemd.unit(5)
+
+ * The podman-auto-update.server and podman-auto-update.timer systemd services
+   are no longer activated by default, following upstream recommendations as per
+   https://github.com/containers/podman/issues/25382#issuecomment-2678082607.
+
+   To minimize surprises on upgrades, the service remains enabled.
+
+   Local system administrators are encouraged to explicitly enable the
+   podman-auto-update.timer service to consciously opt-in into this feature.
+
+ * The podman-clean-transient.service systemd service is no longer
+   activated by default, following upstream recommendations as per
+   https://github.com/containers/podman/issues/25382#issuecomment-2678082607.
+
+   To minimize surprises on upgrades, the service remains enabled.
+
+   Local system administrators are encouraged to explicitly enable the
+   podman-clean-transient service to consciously opt-in into this feature.
+   Most users will not require the "transient store" feature and thus
+   benefit from fewer systemd services enabled by default.
+
+ * The podman.socket systemd service is no longer enabled by default,
+   again following the upstream recommendation discussed above. This
+   socket is used to activate the systemd service podman.service, which
+   runs a dockerd-like service to run containers. Upstream generally
+   advises against this behavior, and strongly recommends looking into
+   quadlets instead. For more details, please consult
+   podman-systemd.unit(5)
+
+   To minimize surprises on upgrades, the service remains enabled.
+
+ -- Reinhard Tartler <siretart@tauware.de>  Thu, 20 Mar 2025 09:30:47 -0400
+
 libpod (4.6.2+ds1-1) unstable; urgency=medium
 
   Podman 4.6 changes the default storage driver from vfs to overlay.

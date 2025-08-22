@@ -8,6 +8,7 @@ linters:
   disable:
     # too many reports but requires attention
     - depguard
+    - intrange # should be turned on but we have to convert each place manually as there is no auto fix function
     - tagalign
     - perfsprint
     - typecheck
@@ -26,7 +27,6 @@ linters:
     - wsl
     - godox
     - tparallel
-    - gomnd
     - nlreturn
     - noctx
     - nestif
@@ -61,7 +61,7 @@ linters:
     - nonamedreturns
     - exhaustruct
     # deprecated linters
-    - execinquery
+    - tenv
 linters-settings:
   errcheck:
     check-blank: false
@@ -88,3 +88,8 @@ issues:
     - dependencies
   exclude-files:
     - swagger.go
+  exclude-rules:
+    # Exclude recvcheck from running on the imported k8s files, to much failures
+    - path: pkg/k8s.io/
+      linters:
+        - recvcheck

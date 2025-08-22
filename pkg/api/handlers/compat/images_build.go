@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/containers/buildah"
@@ -34,6 +35,13 @@ import (
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
 )
+
+func genSpaceErr(err error) error {
+	if errors.Is(err, syscall.ENOSPC) {
+		return fmt.Errorf("context directory may be too large: %w", err)
+	}
+	return err
+}
 
 func BuildImage(w http.ResponseWriter, r *http.Request) {
 	if hdr, found := r.Header["Content-Type"]; found && len(hdr) > 0 {
@@ -74,6 +82,13 @@ func BuildImage(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	contextDirectory, err := extractTarFile(anchorDir, r)
+	if err != nil {
+		utils.InternalServerError(w, genSpaceErr(err))
+		return
+	}
+
+	runtime := r.Context().Value(api.RuntimeKey).(*libpod.Runtime)
+	conf, err := runtime.GetConfigNoCopy()
 	if err != nil {
 		utils.InternalServerError(w, err)
 		return
@@ -127,6 +142,7 @@ func BuildImage(w http.ResponseWriter, r *http.Request) {
 		Memory                  int64    `schema:"memory"`
 		NamespaceOptions        string   `schema:"nsoptions"`
 		NoCache                 bool     `schema:"nocache"`
+		NoHosts                 bool     `schema:"nohosts"`
 		OmitHistory             bool     `schema:"omithistory"`
 		OSFeatures              []string `schema:"osfeature"`
 		OSVersion               string   `schema:"osversion"`
@@ -139,6 +155,8 @@ func BuildImage(w http.ResponseWriter, r *http.Request) {
 		Rm                      bool     `schema:"rm"`
 		RusageLogFile           string   `schema:"rusagelogfile"`
 		Remote                  string   `schema:"remote"`
+		Retry                   int      `schema:"retry"`
+		RetryDelay              string   `schema:"retry-delay"`
 		Seccomp                 string   `schema:"seccomp"`
 		Secrets                 string   `schema:"secrets"`
 		SecurityOpt             string   `schema:"securityopt"`
@@ -161,6 +179,8 @@ func BuildImage(w http.ResponseWriter, r *http.Request) {
 		ShmSize:          64 * 1024 * 1024,
 		TLSVerify:        true,
 		SkipUnusedStages: true,
+		Retry:            int(conf.Engine.Retry),
+		RetryDelay:       conf.Engine.RetryDelay,
 	}
 
 	decoder := utils.GetDecoder(r)
@@ -205,7 +225,7 @@ func BuildImage(w http.ResponseWriter, r *http.Request) {
 		}
 		tempDir, subDir, err := buildahDefine.TempDirForURL(anchorDir, "buildah", query.Remote)
 		if err != nil {
-			utils.InternalServerError(w, err)
+			utils.InternalServerError(w, genSpaceErr(err))
 			return
 		}
 		if tempDir != "" {
@@ -635,7 +655,10 @@ func BuildImage(w http.ResponseWriter, r *http.Request) {
 		AuthFilePath:     authfile,
 		DockerAuthConfig: creds,
 	}
-	utils.PossiblyEnforceDockerHub(r, systemContext)
+	if err := utils.PossiblyEnforceDockerHub(r, systemContext); err != nil {
+		utils.Error(w, http.StatusInternalServerError, fmt.Errorf("checking to enforce DockerHub: %w", err))
+		return
+	}
 
 	if _, found := r.URL.Query()["tlsVerify"]; found {
 		systemContext.DockerInsecureSkipTLSVerify = types.NewOptionalBool(!query.TLSVerify)
@@ -661,7 +684,15 @@ func BuildImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	runtime := r.Context().Value(api.RuntimeKey).(*libpod.Runtime)
+	retryDelay := 2 * time.Second
+	if query.RetryDelay != "" {
+		retryDelay, err = time.ParseDuration(query.RetryDelay)
+		if err != nil {
+			utils.BadRequest(w, "retry-delay", query.RetryDelay, err)
+			return
+		}
+	}
+
 	buildOptions := buildahDefine.BuildOptions{
 		AddCapabilities:         addCaps,
 		AdditionalBuildContexts: additionalBuildContexts,
@@ -690,6 +721,7 @@ func BuildImage(w http.ResponseWriter, r *http.Request) {
 			LabelOpts:          labelOpts,
 			Memory:             query.Memory,
 			MemorySwap:         query.MemSwap,
+			NoHosts:            query.NoHosts,
 			OmitHistory:        query.OmitHistory,
 			SeccompProfilePath: seccomp,
 			ShmSize:            strconv.Itoa(query.ShmSize),
@@ -719,7 +751,7 @@ func BuildImage(w http.ResponseWriter, r *http.Request) {
 		Layers:                         query.Layers,
 		LogRusage:                      query.LogRusage,
 		Manifest:                       query.Manifest,
-		MaxPullPushRetries:             3,
+		MaxPullPushRetries:             query.Retry,
 		NamespaceOptions:               nsoptions,
 		NoCache:                        query.NoCache,
 		OSFeatures:                     query.OSFeatures,
@@ -728,7 +760,7 @@ func BuildImage(w http.ResponseWriter, r *http.Request) {
 		Output:                         output,
 		OutputFormat:                   format,
 		PullPolicy:                     pullPolicy,
-		PullPushRetryDelay:             2 * time.Second,
+		PullPushRetryDelay:             retryDelay,
 		Quiet:                          query.Quiet,
 		Registry:                       registry,
 		RemoveIntermediateCtrs:         query.Rm,
@@ -744,7 +776,7 @@ func BuildImage(w http.ResponseWriter, r *http.Request) {
 
 	platforms := query.Platform
 	if len(platforms) == 1 {
-		// Docker API uses comma sperated platform arg so match this here
+		// Docker API uses comma separated platform arg so match this here
 		platforms = strings.Split(query.Platform[0], ",")
 	}
 	for _, platformSpec := range platforms {

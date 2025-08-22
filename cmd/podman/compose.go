@@ -26,7 +26,7 @@ var composeCommand = &cobra.Command{
 
 The default compose providers are docker-compose and podman-compose.  If installed, docker-compose takes precedence since it is the original implementation of the Compose specification and is widely used on the supported platforms (i.e., Linux, Mac OS, Windows).
 
-If you want to change the default behavior or have a custom installation path for your provider of choice, please change the compose_provider field in containers.conf(5).  You may also set PODMAN_COMPOSE_PROVIDER environment variable.`,
+If you want to change the default behavior or have a custom installation path for your provider of choice, please change the compose_providers field in containers.conf(5) to compose_providers = ["/path/to/provider"]. You may also set the PODMAN_COMPOSE_PROVIDER environment variable.`,
 	RunE:              composeMain,
 	ValidArgsFunction: composeCompletion,
 	Example: `podman compose -f nginx.yaml up --detach
@@ -170,6 +170,18 @@ func composeEnv() ([]string, error) {
 	}, nil
 }
 
+// composeShouldLogWarning returns whether a notice on engine redirection should be piped to stderr regardless of logging configuration
+func composeShouldLogWarning() (bool, error) {
+	if shouldWarnLogsEnv, ok := os.LookupEnv("PODMAN_COMPOSE_WARNING_LOGS"); ok {
+		if shouldWarnLogsEnvVal, err := strconv.ParseBool(shouldWarnLogsEnv); err == nil {
+			return shouldWarnLogsEnvVal, nil
+		} else if shouldWarnLogsEnv != "" {
+			return true, fmt.Errorf("PODMAN_COMPOSE_WARNING_LOGS should be a boolean: %w", err)
+		}
+	}
+	return registry.PodmanConfig().ContainersConfDefaultsRO.Engine.ComposeWarningLogs, nil
+}
+
 // underline uses ANSI codes to underline the specified string.
 func underline(str string) string {
 	return "\033[4m" + str + "\033[0m"
@@ -229,7 +241,11 @@ func composeHelp(cmd *cobra.Command) error {
 		return err
 	}
 
-	return composeProviderExec([]string{"--help"}, nil, nil, registry.PodmanConfig().ContainersConfDefaultsRO.Engine.ComposeWarningLogs)
+	shouldLog, err := composeShouldLogWarning()
+	if err != nil {
+		return err
+	}
+	return composeProviderExec([]string{"--help"}, nil, nil, shouldLog)
 }
 
 // composeMain is the main function of the compose command.
@@ -249,5 +265,9 @@ func composeMain(cmd *cobra.Command, args []string) error {
 		return composeHelp(cmd)
 	}
 
-	return composeProviderExec(args, nil, nil, registry.PodmanConfig().ContainersConfDefaultsRO.Engine.ComposeWarningLogs)
+	shouldLog, err := composeShouldLogWarning()
+	if err != nil {
+		return err
+	}
+	return composeProviderExec(args, nil, nil, shouldLog)
 }

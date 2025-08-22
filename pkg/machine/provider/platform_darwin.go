@@ -2,6 +2,7 @@ package provider
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -36,17 +37,21 @@ func Get() (vmconfigs.VMProvider, error) {
 	case define.AppleHvVirt:
 		return new(applehv.AppleHVStubber), nil
 	case define.LibKrun:
+		if runtime.GOARCH == "amd64" {
+			return nil, errors.New("libkrun is not supported on Intel based machines. Please revert to the applehv provider")
+		}
 		return new(libkrun.LibKrunStubber), nil
 	default:
 		return nil, fmt.Errorf("unsupported virtualization provider: `%s`", resolvedVMType.String())
 	}
 }
 
-func GetAll(_ bool) ([]vmconfigs.VMProvider, error) {
-	return []vmconfigs.VMProvider{
-		new(applehv.AppleHVStubber),
-		new(libkrun.LibKrunStubber),
-	}, nil
+func GetAll() []vmconfigs.VMProvider {
+	configs := []vmconfigs.VMProvider{new(applehv.AppleHVStubber)}
+	if runtime.GOARCH == "arm64" {
+		configs = append(configs, new(libkrun.LibKrunStubber))
+	}
+	return configs
 }
 
 // SupportedProviders returns the providers that are supported on the host operating system
@@ -58,27 +63,23 @@ func SupportedProviders() []define.VMType {
 	return supported
 }
 
-// InstalledProviders returns the supported providers that are installed on the host
-func InstalledProviders() ([]define.VMType, error) {
-	installed := []define.VMType{}
-
-	appleHvInstalled, err := appleHvInstalled()
-	if err != nil {
-		return nil, err
+func IsInstalled(provider define.VMType) (bool, error) {
+	switch provider {
+	case define.AppleHvVirt:
+		ahv, err := appleHvInstalled()
+		if err != nil {
+			return false, err
+		}
+		return ahv, nil
+	case define.LibKrun:
+		lkr, err := libKrunInstalled()
+		if err != nil {
+			return false, err
+		}
+		return lkr, nil
+	default:
+		return false, nil
 	}
-	if appleHvInstalled {
-		installed = append(installed, define.AppleHvVirt)
-	}
-
-	libKrunInstalled, err := libKrunInstalled()
-	if err != nil {
-		return nil, err
-	}
-	if libKrunInstalled {
-		installed = append(installed, define.LibKrun)
-	}
-
-	return installed, nil
 }
 
 func appleHvInstalled() (bool, error) {

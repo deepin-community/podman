@@ -1,0 +1,21 @@
+From: Reinhard Tartler <siretart@tauware.de>
+Date: Thu, 3 Oct 2024 07:18:40 -0400
+Subject: test/system: Skip some system tests that fail in Debian
+
+---
+ test/system/030-run.bats | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/test/system/030-run.bats b/test/system/030-run.bats
+index 99def8d..5cdbc0b 100644
+--- a/test/system/030-run.bats
++++ b/test/system/030-run.bats
+@@ -846,7 +846,7 @@ json-file | f
+     is "$output" ".*HOME=/.*"
+ }
+ 
+-# bats test_tags=ci:parallel
++# bats test_tags=ci:parallel, debian_ignore
+ @test "podman run --timeout - basic test" {
+     cname=c_$(safename)
+     t0=$SECONDS

@@ -3,7 +3,6 @@
 package abi
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/containers/common/libimage"
+	"github.com/containers/common/libimage/define"
 	cp "github.com/containers/image/v5/copy"
 	"github.com/containers/image/v5/docker"
 	"github.com/containers/image/v5/manifest"
@@ -49,9 +49,10 @@ func (ir *ImageEngine) ManifestCreate(ctx context.Context, name string, images [
 		}
 	}
 
-	annotateOptions := &libimage.ManifestListAnnotateOptions{}
 	if len(opts.Annotations) != 0 {
-		annotateOptions.IndexAnnotations = opts.Annotations
+		annotateOptions := &libimage.ManifestListAnnotateOptions{
+			IndexAnnotations: opts.Annotations,
+		}
 		if err := manifestList.AnnotateInstance("", annotateOptions); err != nil {
 			return "", err
 		}
@@ -81,7 +82,7 @@ func (ir *ImageEngine) ManifestExists(ctx context.Context, name string) (*entiti
 }
 
 // ManifestInspect returns the content of a manifest list or image
-func (ir *ImageEngine) ManifestInspect(ctx context.Context, name string, opts entities.ManifestInspectOptions) ([]byte, error) {
+func (ir *ImageEngine) ManifestInspect(ctx context.Context, name string, opts entities.ManifestInspectOptions) (*define.ManifestListData, error) {
 	// NOTE: we have to do a bit of a limbo here as `podman manifest
 	// inspect foo` wants to do a remote-inspect of foo iff "foo" in the
 	// containers storage is an ordinary image but not a manifest list.
@@ -97,25 +98,12 @@ func (ir *ImageEngine) ManifestInspect(ctx context.Context, name string, opts en
 		return nil, err
 	}
 
-	schema2List, err := manifestList.Inspect()
-	if err != nil {
-		return nil, err
-	}
-
-	rawSchema2List, err := json.Marshal(schema2List)
-	if err != nil {
-		return nil, err
-	}
-
-	var b bytes.Buffer
-	if err := json.Indent(&b, rawSchema2List, "", "    "); err != nil {
-		return nil, fmt.Errorf("rendering manifest %s for display: %w", name, err)
-	}
-	return b.Bytes(), nil
+	return manifestList.Inspect()
 }
 
 // inspect a remote manifest list.
-func (ir *ImageEngine) remoteManifestInspect(ctx context.Context, name string, opts entities.ManifestInspectOptions) ([]byte, error) {
+func (ir *ImageEngine) remoteManifestInspect(ctx context.Context, name string, opts entities.ManifestInspectOptions) (*define.ManifestListData, error) {
+	inspectList := define.ManifestListData{}
 	sys := ir.Libpod.SystemContext()
 
 	if opts.Authfile != "" {
@@ -136,7 +124,6 @@ func (ir *ImageEngine) remoteManifestInspect(ctx context.Context, name string, o
 		latestErr error
 		result    []byte
 		manType   string
-		b         bytes.Buffer
 	)
 	appendErr := func(e error) {
 		if latestErr == nil {
@@ -183,27 +170,24 @@ func (ir *ImageEngine) remoteManifestInspect(ctx context.Context, name string, o
 		if err != nil {
 			return nil, fmt.Errorf("parsing manifest blob %q as a %q: %w", string(result), manType, err)
 		}
+
 		if result, err = schema2Manifest.Serialize(); err != nil {
 			return nil, err
 		}
 	default:
-		listBlob, err := manifest.ListFromBlob(result, manType)
+		list, err := manifest.ListFromBlob(result, manType)
 		if err != nil {
 			return nil, fmt.Errorf("parsing manifest blob %q as a %q: %w", string(result), manType, err)
-		}
-		list, err := listBlob.ConvertToMIMEType(manifest.DockerV2ListMediaType)
-		if err != nil {
-			return nil, err
 		}
 		if result, err = list.Serialize(); err != nil {
 			return nil, err
 		}
 	}
 
-	if err = json.Indent(&b, result, "", "    "); err != nil {
-		return nil, fmt.Errorf("rendering manifest %s for display: %w", name, err)
+	if err := json.Unmarshal(result, &inspectList); err != nil {
+		return nil, err
 	}
-	return b.Bytes(), nil
+	return &inspectList, nil
 }
 
 // ManifestAdd adds images to the manifest list
@@ -247,18 +231,14 @@ func (ir *ImageEngine) ManifestAdd(ctx context.Context, name string, images []st
 			Variant:      opts.Variant,
 			Subject:      opts.IndexSubject,
 		}
-		if len(opts.Annotation) != 0 {
-			annotations := make(map[string]string)
-			for _, annotationSpec := range opts.Annotation {
-				key, val, hasVal := strings.Cut(annotationSpec, "=")
-				if !hasVal {
-					return "", fmt.Errorf("no value given for annotation %q", key)
-				}
-				annotations[key] = val
-			}
-			opts.Annotations = envLib.Join(opts.Annotations, annotations)
+
+		if annotateOptions.Annotations, err = mergeAnnotations(opts.Annotations, opts.Annotation); err != nil {
+			return "", err
 		}
-		annotateOptions.Annotations = opts.Annotations
+
+		if annotateOptions.IndexAnnotations, err = mergeAnnotations(opts.IndexAnnotations, opts.IndexAnnotation); err != nil {
+			return "", err
+		}
 
 		if err := manifestList.AnnotateInstance(instanceDigest, annotateOptions); err != nil {
 			return "", err
@@ -397,10 +377,12 @@ func (ir *ImageEngine) ManifestAddArtifact(ctx context.Context, name string, fil
 		Variant:      opts.Variant,
 		Subject:      opts.IndexSubject,
 	}
-	if annotateOptions.Annotations, err = mergeAnnotations(opts.Annotations, opts.Annotation); err != nil {
+
+	if annotateOptions.Annotations, err = mergeAnnotations(opts.ManifestAnnotateOptions.Annotations, opts.ManifestAnnotateOptions.Annotation); err != nil {
 		return "", err
 	}
-	if annotateOptions.IndexAnnotations, err = mergeAnnotations(opts.IndexAnnotations, opts.IndexAnnotation); err != nil {
+
+	if annotateOptions.IndexAnnotations, err = mergeAnnotations(opts.ManifestAnnotateOptions.IndexAnnotations, opts.ManifestAnnotateOptions.IndexAnnotation); err != nil {
 		return "", err
 	}
 
@@ -478,8 +460,8 @@ func (ir *ImageEngine) ManifestRemoveDigest(ctx context.Context, name, image str
 }
 
 // ManifestRm removes the specified manifest list from storage
-func (ir *ImageEngine) ManifestRm(ctx context.Context, names []string) (report *entities.ImageRemoveReport, rmErrors []error) {
-	return ir.Remove(ctx, names, entities.ImageRemoveOptions{LookupManifest: true})
+func (ir *ImageEngine) ManifestRm(ctx context.Context, names []string, opts entities.ImageRemoveOptions) (report *entities.ImageRemoveReport, rmErrors []error) {
+	return ir.Remove(ctx, names, entities.ImageRemoveOptions{LookupManifest: true, Ignore: opts.Ignore})
 }
 
 // ManifestPush pushes a manifest list or image index to the destination
