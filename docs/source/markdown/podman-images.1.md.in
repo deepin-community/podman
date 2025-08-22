@@ -106,9 +106,7 @@ Valid placeholders for the Go template are listed below:
 
 Display the history of image names.  If an image gets re-tagged or untagged, then the image name history gets prepended (latest image first).  This is especially useful when undoing a tag operation or an image does not contain any name because it has been untagged.
 
-#### **--no-trunc**
-
-Do not truncate the output (default *false*).
+@@option no-trunc
 
 @@option noheading
 
@@ -119,6 +117,7 @@ Lists only the image IDs.
 #### **--sort**=*sort*
 
 Sort by *created*, *id*, *repository*, *size* or *tag* (default: **created**)
+When sorting by *repository* it also sorts by the *tag* as second criteria to provide a stable output.
 
 ## EXAMPLE
 
@@ -242,6 +241,11 @@ docker.io/library/alpine   latest   3fd9065eaf02   5 months ago    4.41 MB
 
 ## SEE ALSO
 **[podman(1)](podman.1.md)**, **[containers-storage.conf(5)](https://github.com/containers/storage/blob/main/docs/containers-storage.conf.5.md)**
+
+### Troubleshooting
+
+See [podman-troubleshooting(7)](https://github.com/containers/podman/blob/main/troubleshooting.md)
+for solutions to common issues.
 
 ## HISTORY
 March 2017, Originally compiled by Dan Walsh `<dwalsh@redhat.com>`

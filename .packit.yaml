@@ -12,8 +12,6 @@ packages:
   podman-centos:
     pkg_tool: centpkg
     specfile_path: rpm/podman.spec
-  podman-rhel:
-    specfile_path: rpm/podman.spec
   podman-eln:
     specfile_path: rpm/podman.spec
 
@@ -22,31 +20,25 @@ srpm_build_deps:
   - make
 
 actions:
-  fix-spec-file:
-    - "bash .packit.sh"
+  fix-spec-file: "bash .packit-copr-rpm.sh"
+  pre-sync: "bash .packit-rpm-git-commit.sh"
 
 jobs:
   - job: copr_build
     trigger: pull_request
     packages: [podman-fedora]
-    notifications: &packit_build_failure_notification
+    notifications: &packit_generic_failure_notification
       failure_comment:
-        message: "Ephemeral COPR build failed. @containers/packit-build please check."
+        message: "[NON-BLOCKING] Packit jobs failed. @containers/packit-build please check. Everyone else, feel free to ignore."
     enable_net: true
     targets:
-      - fedora-development-x86_64
-      - fedora-development-aarch64
-      - fedora-latest-x86_64
-      - fedora-latest-aarch64
-      - fedora-latest-stable-x86_64
-      - fedora-latest-stable-aarch64
-      - fedora-40-x86_64
-      - fedora-40-aarch64
+      - fedora-all-x86_64
+      - fedora-all-aarch64
 
   - job: copr_build
     trigger: pull_request
     packages: [podman-eln]
-    notifications: *packit_build_failure_notification
+    notifications: *packit_generic_failure_notification
     enable_net: true
     targets:
       fedora-eln-x86_64:
@@ -59,22 +51,13 @@ jobs:
   - job: copr_build
     trigger: pull_request
     packages: [podman-centos]
-    notifications: *packit_build_failure_notification
+    notifications: *packit_generic_failure_notification
     enable_net: true
     targets:
       - centos-stream-9-x86_64
       - centos-stream-9-aarch64
       - centos-stream-10-x86_64
       - centos-stream-10-aarch64
-
-  - job: copr_build
-    trigger: pull_request
-    packages: [podman-rhel]
-    notifications: *packit_build_failure_notification
-    enable_net: true
-    targets:
-      - epel-9-x86_64
-      - epel-9-aarch64
 
   # Run on commit to main branch
   - job: copr_build

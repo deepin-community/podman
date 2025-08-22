@@ -62,7 +62,10 @@ Options:
 
 var (
 	rootCmd = &cobra.Command{
-		Use:                   filepath.Base(os.Args[0]) + " [options]",
+		// In shell completion, there is `.exe` suffix on Windows.
+		// This does not provide the same experience across platforms
+		// and was mentioned in [#16499](https://github.com/containers/podman/issues/16499).
+		Use:                   strings.TrimSuffix(filepath.Base(os.Args[0]), ".exe") + " [options]",
 		Long:                  "Manage pods, containers and images",
 		SilenceUsage:          true,
 		SilenceErrors:         true,
@@ -113,7 +116,7 @@ func init() {
 }
 
 func Execute() {
-	if err := rootCmd.ExecuteContext(registry.GetContextWithOptions()); err != nil {
+	if err := rootCmd.ExecuteContext(registry.Context()); err != nil {
 		if registry.GetExitCode() == 0 {
 			registry.SetExitCode(define.ExecErrorCodeGeneric)
 		}
@@ -543,7 +546,7 @@ func rootFlags(cmd *cobra.Command, podmanConfig *entities.PodmanConfig) {
 		pFlags.StringVar(&podmanConfig.ConmonPath, conmonFlagName, "", "Path of the conmon binary")
 		_ = cmd.RegisterFlagCompletionFunc(conmonFlagName, completion.AutocompleteDefault)
 
-		// TODO (5.0): --network-cmd-path is deprecated, remove this option with the next major release
+		// TODO (6.0): --network-cmd-path is deprecated, remove this option with the next major release
 		// We need to find all the places that use r.config.Engine.NetworkCmdPath and remove it
 		networkCmdPathFlagName := "network-cmd-path"
 		pFlags.StringVar(&podmanConfig.ContainersConf.Engine.NetworkCmdPath, networkCmdPathFlagName, podmanConfig.ContainersConfDefaultsRO.Engine.NetworkCmdPath, "Path to the command for configuring the network")

@@ -76,11 +76,6 @@ func (r *MissingRuntime) CreateContainer(ctr *Container, restoreOptions *Contain
 	return 0, r.printError()
 }
 
-// UpdateContainerStatus is not available as the runtime is missing
-func (r *MissingRuntime) UpdateContainerStatus(ctr *Container) error {
-	return r.printError()
-}
-
 // StartContainer is not available as the runtime is missing
 func (r *MissingRuntime) StartContainer(ctr *Container) error {
 	return r.printError()
@@ -229,6 +224,12 @@ func (r *MissingRuntime) ExitFilePath(ctr *Container) (string, error) {
 // The oom file will only exist if the container was oom killed.
 func (r *MissingRuntime) OOMFilePath(ctr *Container) (string, error) {
 	return filepath.Join(r.persistDir, ctr.ID(), "oom"), nil
+}
+
+// PersistDirectoryPath is the path to the container's persist directory.
+// It may include files like the exit file and OOM file.
+func (r *MissingRuntime) PersistDirectoryPath(ctr *Container) (string, error) {
+	return filepath.Join(r.persistDir, ctr.ID()), nil
 }
 
 // RuntimeInfo returns information on the missing runtime

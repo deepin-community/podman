@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -16,7 +17,9 @@ import (
 	"github.com/containers/podman/v5/pkg/machine/env"
 	"github.com/containers/podman/v5/pkg/machine/ignition"
 	"github.com/containers/podman/v5/pkg/machine/lock"
+	"github.com/containers/podman/v5/pkg/machine/provider"
 	"github.com/containers/podman/v5/pkg/machine/proxyenv"
+	"github.com/containers/podman/v5/pkg/machine/shim/diskpull"
 	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
 	"github.com/containers/podman/v5/utils"
 	"github.com/hashicorp/go-multierror"
@@ -151,7 +154,7 @@ func Init(opts machineDefine.InitOptions, mp vmconfigs.VMProvider) error {
 	// "/path
 	// "docker://quay.io/something/someManifest
 
-	if err := mp.GetDisk(opts.Image, dirs, mc); err != nil {
+	if err := diskpull.GetDisk(opts.Image, dirs, mc.ImagePath, mp.VMType(), mc.Name); err != nil {
 		return err
 	}
 
@@ -194,12 +197,41 @@ func Init(opts machineDefine.InitOptions, mp vmconfigs.VMProvider) error {
 	// copy it into the conf dir
 	if len(opts.IgnitionPath) > 0 {
 		err = ignBuilder.BuildWithIgnitionFile(opts.IgnitionPath)
-		return err
+
+		if err != nil {
+			return err
+		}
+	} else {
+		err = ignBuilder.GenerateIgnitionConfig()
+		if err != nil {
+			return err
+		}
 	}
 
-	err = ignBuilder.GenerateIgnitionConfig()
-	if err != nil {
-		return err
+	if len(opts.PlaybookPath) > 0 {
+		f, err := os.Open(opts.PlaybookPath)
+		if err != nil {
+			return err
+		}
+		s, err := io.ReadAll(f)
+		if err != nil {
+			return fmt.Errorf("read playbook: %w", err)
+		}
+
+		playbookDest := fmt.Sprintf("/home/%s/%s", userName, "playbook.yaml")
+
+		if mp.VMType() != machineDefine.WSLVirt {
+			err = ignBuilder.AddPlaybook(string(s), playbookDest, userName)
+			if err != nil {
+				return err
+			}
+		}
+
+		mc.Ansible = &vmconfigs.AnsibleConfig{
+			PlaybookPath: playbookDest,
+			Contents:     string(s),
+			User:         userName,
+		}
 	}
 
 	readyIgnOpts, err := mp.PrepareIgnition(mc, &ignBuilder)
@@ -230,7 +262,11 @@ func Init(opts machineDefine.InitOptions, mp vmconfigs.VMProvider) error {
 	}
 
 	cleanup := func() error {
-		return connection.RemoveConnections(mc.Name, mc.Name+"-root")
+		machines, err := provider.GetAllMachinesAndRootfulness()
+		if err != nil {
+			return err
+		}
+		return connection.RemoveConnections(machines, mc.Name, mc.Name+"-root")
 	}
 	callbackFuncs.Add(cleanup)
 
@@ -239,9 +275,10 @@ func Init(opts machineDefine.InitOptions, mp vmconfigs.VMProvider) error {
 		return err
 	}
 
-	err = ignBuilder.Build()
-	if err != nil {
-		return err
+	if len(opts.IgnitionPath) == 0 {
+		if err := ignBuilder.Build(); err != nil {
+			return err
+		}
 	}
 
 	return mc.Write()
@@ -255,7 +292,7 @@ func VMExists(name string, vmstubbers []vmconfigs.VMProvider) (*vmconfigs.Machin
 		return nil, false, err
 	}
 	if mc, found := mcs[name]; found {
-		return mc, true, nil
+		return mc.MachineConfig, true, nil
 	}
 	// Check with the provider hypervisor
 	for _, vmstubber := range vmstubbers {
@@ -271,28 +308,46 @@ func VMExists(name string, vmstubbers []vmconfigs.VMProvider) (*vmconfigs.Machin
 }
 
 // checkExclusiveActiveVM checks if any of the machines are already running
-func checkExclusiveActiveVM(provider vmconfigs.VMProvider, mc *vmconfigs.MachineConfig) error {
+func checkExclusiveActiveVM(currentProvider vmconfigs.VMProvider, mc *vmconfigs.MachineConfig) error {
+	providers := provider.GetAll()
 	// Check if any other machines are running; if so, we error
-	localMachines, err := getMCsOverProviders([]vmconfigs.VMProvider{provider})
+	localMachines, err := getMCsOverProviders(providers)
 	if err != nil {
 		return err
 	}
+
 	for name, localMachine := range localMachines {
-		state, err := provider.State(localMachine, false)
+		state, err := localMachine.Provider.State(localMachine.MachineConfig, false)
 		if err != nil {
 			return err
 		}
 		if state == machineDefine.Running || state == machineDefine.Starting {
-			return fmt.Errorf("unable to start %q: machine %s: %w", mc.Name, name, machineDefine.ErrVMAlreadyRunning)
+			if mc.Name == name {
+				return fmt.Errorf("unable to start %q: already running", mc.Name)
+			}
+
+			// A machine is running in the current provider
+			if currentProvider.VMType() == localMachine.Provider.VMType() {
+				fail := machineDefine.ErrMultipleActiveVM{Name: name}
+				return fmt.Errorf("unable to start %q: %w", mc.Name, &fail)
+			}
+			// A machine is running in an alternate provider
+			fail := machineDefine.ErrMultipleActiveVM{Name: name, Provider: localMachine.Provider.VMType().String()}
+			return fmt.Errorf("unable to start: %w", &fail)
 		}
 	}
 	return nil
 }
 
+type knownMachineConfig struct {
+	Provider      vmconfigs.VMProvider
+	MachineConfig *vmconfigs.MachineConfig
+}
+
 // getMCsOverProviders loads machineconfigs from a config dir derived from the "provider".  it returns only what is known on
 // disk so things like status may be incomplete or inaccurate
-func getMCsOverProviders(vmstubbers []vmconfigs.VMProvider) (map[string]*vmconfigs.MachineConfig, error) {
-	mcs := make(map[string]*vmconfigs.MachineConfig)
+func getMCsOverProviders(vmstubbers []vmconfigs.VMProvider) (map[string]knownMachineConfig, error) {
+	mcs := make(map[string]knownMachineConfig)
 	for _, stubber := range vmstubbers {
 		dirs, err := env.GetMachineDirs(stubber.VMType())
 		if err != nil {
@@ -307,7 +362,10 @@ func getMCsOverProviders(vmstubbers []vmconfigs.VMProvider) (map[string]*vmconfi
 		// iterate known mcs and add the stubbers
 		for mcName, mc := range stubberMCs {
 			if _, ok := mcs[mcName]; !ok {
-				mcs[mcName] = mc
+				mcs[mcName] = knownMachineConfig{
+					Provider:      stubber,
+					MachineConfig: mc,
+				}
 			}
 		}
 	}
@@ -401,7 +459,7 @@ func Start(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, dirs *machineDe
 		}
 
 		if state == machineDefine.Running || state == machineDefine.Starting {
-			return fmt.Errorf("machine %s: %w", mc.Name, machineDefine.ErrVMAlreadyRunning)
+			return fmt.Errorf("unable to start %q: already running", mc.Name)
 		}
 	}
 
@@ -512,6 +570,16 @@ func Start(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, dirs *machineDe
 		}
 	}
 
+	isFirstBoot, err := mc.IsFirstBoot()
+	if err != nil {
+		logrus.Error(err)
+	}
+	if mp.VMType() == machineDefine.WSLVirt && mc.Ansible != nil && isFirstBoot {
+		if err := machine.CommonSSHSilent(mc.Ansible.User, mc.SSH.IdentityPath, mc.Name, mc.SSH.Port, []string{"ansible-playbook", mc.Ansible.PlaybookPath}); err != nil {
+			logrus.Error(err)
+		}
+	}
+
 	// Provider is responsible for waiting
 	if mp.UseProviderNetworkSetup() {
 		return nil
@@ -580,7 +648,12 @@ func Remove(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, dirs *machineD
 		}
 	}
 
-	rmFiles, genericRm, err := mc.Remove(opts.SaveIgnition, opts.SaveImage)
+	machines, err := provider.GetAllMachinesAndRootfulness()
+	if err != nil {
+		return err
+	}
+
+	rmFiles, genericRm, err := mc.Remove(machines, opts.SaveIgnition, opts.SaveImage)
 	if err != nil {
 		return err
 	}
@@ -655,12 +728,17 @@ func Reset(mps []vmconfigs.VMProvider, opts machine.ResetOptions) error {
 		}
 		removeDirs = append(removeDirs, d)
 
+		machines, err := provider.GetAllMachinesAndRootfulness()
+		if err != nil {
+			return err
+		}
+
 		for _, mc := range mcs {
 			err := Stop(mc, p, d, true)
 			if err != nil {
 				resetErrors = multierror.Append(resetErrors, err)
 			}
-			_, genericRm, err := mc.Remove(false, false)
+			_, genericRm, err := mc.Remove(machines, false, false)
 			if err != nil {
 				resetErrors = multierror.Append(resetErrors, err)
 			}

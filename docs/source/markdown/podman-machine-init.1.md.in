@@ -52,6 +52,8 @@ Fedora CoreOS upgrades come out every 14 days and are detected and installed aut
 For more information on updates and advanced configuration,
 see the Fedora CoreOS documentation about [auto-updates](https://docs.fedoraproject.org/en-US/fedora-coreos/auto-updates/) and [update strategies](https://coreos.github.io/zincati/usage/updates-strategy/).
 
+Default Podman machine settings can be set via the [machine] section in the containers.conf(5) file.
+
 ## OPTIONS
 
 #### **--cpus**=*number*
@@ -78,6 +80,8 @@ is copied into the user's CONF_DIR and renamed.  Additionally, no SSH keys are g
 Fully qualified registry, path, or URL to a VM image.
 Registry target must be in the form of `docker://registry/repo/image:version`.
 
+Note: Only images provided by podman will be supported.
+
 #### **--memory**, **-m**=*number*
 
 Memory (in MiB). Note: 1024MiB = 1GiB.
@@ -85,6 +89,13 @@ Memory (in MiB). Note: 1024MiB = 1GiB.
 #### **--now**
 
 Start the virtual machine immediately after it has been initialized.
+
+#### **--playbook**
+
+Add the provided Ansible playbook to the machine and execute it after the first boot.
+
+Note: The playbook will be executed with the same privileges given to the user in the virtual machine. The playbook provided cannot include other files from the host system, as they will not be copied.
+Use of the `--playbook` flag will require the image to include Ansible. The default image provided will have Ansible included.
 
 #### **--rootful**
 
@@ -160,6 +171,11 @@ Example: `-v "$HOME/git:$HOME/git:ro,security_model=none"`
 Default volume mounts are defined in *containers.conf*.  Unless changed, the default values
 is `$HOME:$HOME`.
 
+**Note on Windows Subsystem for Linux (WSL)**
+Since all drives are mounted at `/mnt` on startup by default in WSL, passing
+`--volume` is redundant and has no effect. The host home directory for a `C:`
+drive will be mounted at `/mnt/c/Users/<my username>`.
+
 ## EXAMPLES
 
 Initialize the default Podman machine, pulling the content from the internet.
@@ -187,9 +203,9 @@ Initialize the specified Podman machine overriding its memory size, pulling the 
 $ podman machine init --memory=1024 myvm
 ```
 
-Initialize the default Podman machine with the host directory `/Users` mounted into the VM at `/mnt/Users`.
+Initialize the default Podman machine with the host directory `/Users` mounted into the VM at `/Users`.
 ```
-$ podman machine init -v /Users:/mnt/Users
+$ podman machine init -v /Users:/Users
 ```
 
 Initialize the default Podman machine with a usb device passthrough specified with options. Only supported for QEMU Machines.
@@ -203,7 +219,7 @@ $ podman machine init --usb bus=1,devnum=3
 ```
 
 ## SEE ALSO
-**[podman(1)](podman.1.md)**, **[podman-machine(1)](podman-machine.1.md)**
+**[podman(1)](podman.1.md)**, **[podman-machine(1)](podman-machine.1.md)**, **containers.conf(5)**
 
 ## HISTORY
 March 2021, Originally compiled by Ashley Cui <acui@redhat.com>

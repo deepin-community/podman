@@ -6,18 +6,17 @@ import (
 	"time"
 )
 
-// EventerType ...
-type EventerType int
+// EventerType describes the type of event logger
+// The string values for EventerType should be entirely lowercase.
+type EventerType string
 
 const (
 	// LogFile indicates the event logger will be a logfile
-	LogFile EventerType = iota
+	LogFile EventerType = "file"
 	// Journald indicates journald should be used to log events
-	Journald EventerType = iota
+	Journald EventerType = "journald"
 	// Null is a no-op events logger. It does not read or write events.
-	Null EventerType = iota
-	// Memory indicates the event logger will hold events in memory
-	Memory EventerType = iota
+	Null EventerType = "none"
 )
 
 // Event describes the attributes of a libpod event
@@ -41,6 +40,10 @@ type Event struct {
 	Type Type
 	// Health status of the current container
 	HealthStatus string `json:"health_status,omitempty"`
+	// Healthcheck log of the current container
+	HealthLog string `json:"health_log,omitempty"`
+	// HealthFailingStreak log of the current container
+	HealthFailingStreak int `json:"health_failing_streak,omitempty"`
 	// Error code for certain events involving errors.
 	Error string `json:"error,omitempty"`
 
@@ -83,10 +86,15 @@ type Eventer interface {
 	String() string
 }
 
+type ReadResult struct {
+	Event *Event
+	Error error
+}
+
 // ReadOptions describe the attributes needed to read event logs
 type ReadOptions struct {
 	// EventChannel is the comm path back to user
-	EventChannel chan *Event
+	EventChannel chan ReadResult
 	// Filters are key/value pairs that describe to limit output
 	Filters []string
 	// FromStart means you start reading from the start of the logs

@@ -523,6 +523,12 @@ func (s *APIServer) registerImagesHandlers(r *mux.Router) error {
 	//      TBD Extra hosts to add to /etc/hosts
 	//      (As of version 1.xx)
 	//  - in: query
+	//    name: nohosts
+	//    type: boolean
+	//    default:
+	//    description: |
+	//      Not to create /etc/hosts when building the image
+	//  - in: query
 	//    name: remote
 	//    type: string
 	//    default:
@@ -535,6 +541,18 @@ func (s *APIServer) registerImagesHandlers(r *mux.Router) error {
 	//      tarball and the dockerfile parameter is also specified, there must be a file
 	//      with the corresponding path inside the tarball.
 	//      (As of version 1.xx)
+	//  - in: query
+	//    name: retry
+	//    type: integer
+	//    default: 3
+	//    description: |
+	//      Number of times to retry in case of failure when performing push/pull.
+	//  - in: query
+	//    name: retry-delay
+	//    type: string
+	//    default: 2s
+	//    description: |
+	//      Delay between retries in case of push/pull failures.
 	//  - in: query
 	//    name: q
 	//    type: boolean
@@ -1129,6 +1147,12 @@ func (s *APIServer) registerImagesHandlers(r *mux.Router) error {
 	//    description: |
 	//      Remove images even when they are used by external containers (e.g, by build containers)
 	//  - in: query
+	//    name: buildcache
+	//    default: false
+	//    type: boolean
+	//    description: |
+	//      Remove persistent build cache created by build instructions such as `--mount=type=cache`.
+	//  - in: query
 	//    name: filters
 	//    type: string
 	//    description: |
@@ -1483,6 +1507,12 @@ func (s *APIServer) registerImagesHandlers(r *mux.Router) error {
 	//    description: |
 	//      TBD Extra hosts to add to /etc/hosts
 	//      (As of version 1.xx)
+	//  - in: query
+	//    name: nohosts
+	//    type: boolean
+	//    default:
+	//    description: |
+	//      Not to create /etc/hosts when building the image
 	//  - in: query
 	//    name: remote
 	//    type: string

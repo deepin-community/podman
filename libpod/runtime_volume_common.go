@@ -168,16 +168,11 @@ func (r *Runtime) newVolume(ctx context.Context, noCreatePluginVolume bool, opti
 		if err := idtools.SafeChown(volPathRoot, volume.config.UID, volume.config.GID); err != nil {
 			return nil, fmt.Errorf("chowning volume directory %q to %d:%d: %w", volPathRoot, volume.config.UID, volume.config.GID, err)
 		}
-		fullVolPath := filepath.Join(volPathRoot, "_data")
-		if err := os.MkdirAll(fullVolPath, 0755); err != nil {
-			return nil, fmt.Errorf("creating volume directory %q: %w", fullVolPath, err)
-		}
-		if err := idtools.SafeChown(fullVolPath, volume.config.UID, volume.config.GID); err != nil {
-			return nil, fmt.Errorf("chowning volume directory %q to %d:%d: %w", fullVolPath, volume.config.UID, volume.config.GID, err)
-		}
-		if err := LabelVolumePath(fullVolPath, volume.config.MountLabel); err != nil {
-			return nil, err
-		}
+
+		// Setting quotas must happen *before* the _data inner directory
+		// is created, as the volume must be empty for the quota to be
+		// properly applied - if any subdirectories exist before the
+		// quota is applied, the quota will not be applied to them.
 		switch {
 		case volume.config.DisableQuota:
 			if volume.config.Size > 0 || volume.config.Inodes > 0 {
@@ -201,11 +196,25 @@ func (r *Runtime) newVolume(ctx context.Context, noCreatePluginVolume bool, opti
 				Inodes: volume.config.Inodes,
 				Size:   volume.config.Size,
 			}
-			if err := q.SetQuota(fullVolPath, quota); err != nil {
-				return nil, fmt.Errorf("failed to set size quota size=%d inodes=%d for volume directory %q: %w", volume.config.Size, volume.config.Inodes, fullVolPath, err)
+			// Must use volPathRoot not fullVolPath, as we need the
+			// base path for the volume - without the `_data`
+			// subdirectory - so the quota ID assignment logic works
+			// properly.
+			if err := q.SetQuota(volPathRoot, quota); err != nil {
+				return nil, fmt.Errorf("failed to set size quota size=%d inodes=%d for volume directory %q: %w", volume.config.Size, volume.config.Inodes, volPathRoot, err)
 			}
 		}
 
+		fullVolPath := filepath.Join(volPathRoot, "_data")
+		if err := os.MkdirAll(fullVolPath, 0755); err != nil {
+			return nil, fmt.Errorf("creating volume directory %q: %w", fullVolPath, err)
+		}
+		if err := idtools.SafeChown(fullVolPath, volume.config.UID, volume.config.GID); err != nil {
+			return nil, fmt.Errorf("chowning volume directory %q to %d:%d: %w", fullVolPath, volume.config.UID, volume.config.GID, err)
+		}
+		if err := LabelVolumePath(fullVolPath, volume.config.MountLabel); err != nil {
+			return nil, err
+		}
 		volume.config.MountPoint = fullVolPath
 	}
 
@@ -357,13 +366,11 @@ func (r *Runtime) removeVolume(ctx context.Context, v *Volume, force bool, timeo
 		return define.ErrVolumeRemoved
 	}
 
-	v.lock.Lock()
-	defer v.lock.Unlock()
-
-	// Update volume status to pick up a potential removal from state
-	if err := v.update(); err != nil {
-		return err
-	}
+	// DANGEROUS: Do not lock here yet because we might needed to remove containers first.
+	// In general we must always acquire the ctr lock before a volume lock so we cannot lock.
+	// THIS MUST BE DONE to prevent ABBA deadlocks.
+	// It also means the are several races around creating containers with volumes and removing
+	// them in parallel. However that problem exists regadless of taking the lock here or not.
 
 	deps, err := r.state.VolumeInUse(v)
 	if err != nil {
@@ -398,6 +405,15 @@ func (r *Runtime) removeVolume(ctx context.Context, v *Volume, force bool, timeo
 				return fmt.Errorf("removing container %s that depends on volume %s: %w", ctr.ID(), v.Name(), err)
 			}
 		}
+	}
+
+	// Ok now we are good to lock.
+	v.lock.Lock()
+	defer v.lock.Unlock()
+
+	// Update volume status to pick up a potential removal from state
+	if err := v.update(); err != nil {
+		return err
 	}
 
 	// If the volume is still mounted - force unmount it

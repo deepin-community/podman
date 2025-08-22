@@ -53,6 +53,11 @@ func init() {
 
 	flags.BoolVar(&cleanupOptions.Remove, "rm", false, "After cleanup, remove the container entirely")
 	flags.BoolVar(&cleanupOptions.RemoveImage, "rmi", false, "After cleanup, remove the image entirely")
+
+	stoppedOnlyFlag := "stopped-only"
+	flags.BoolVar(&cleanupOptions.StoppedOnly, stoppedOnlyFlag, false, "Only cleanup when the container is in the stopped state")
+	_ = flags.MarkHidden(stoppedOnlyFlag)
+
 	validate.AddLatestFlag(cleanupCommand, &cleanupOptions.Latest)
 }
 
@@ -72,7 +77,7 @@ func cleanup(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	responses, err := registry.ContainerEngine().ContainerCleanup(registry.GetContext(), args, cleanupOptions)
+	responses, err := registry.ContainerEngine().ContainerCleanup(registry.Context(), args, cleanupOptions)
 	if err != nil {
 		// `podman container cleanup` is almost always run in the
 		// background. Our only way of relaying information to the user

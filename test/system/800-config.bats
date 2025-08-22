@@ -66,7 +66,7 @@ EOF
     # container completes fast, and the cleanup *did* happen properly
     # the container is now gone.  So, we need to ignore "no such
     # container" errors from podman wait.
-    CONTAINERS_CONF="$conf_tmp" run_podman '?' wait "$cid"
+    CONTAINERS_CONF="$conf_tmp" run_podman '?' wait --condition=removing "$cid"
     if [[ $status != 0 ]]; then
         is "$output" "Error:.*no such container" "unexpected error from podman wait"
     fi
@@ -227,7 +227,9 @@ EOF
     cname="$output"
 
     # Make sure `env_host` is read
-    run_podman container inspect $cname --format "{{.Config.Env}}"
+    # Only print the env vars that start with "FOO" to avoid printing output that
+    # may be considered problematic (see run_podman in helpers.bash).
+    run_podman container inspect $cname --format '{{range .Config.Env}} {{if eq "F" (slice . 0 1) }} {{.}} {{end}} {{end}}'
     assert "$output" =~ "FOO=$random_env_var" "--module should yield injecting host env vars into the container"
 
     # Make sure `privileged` is read during container creation

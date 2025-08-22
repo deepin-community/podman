@@ -147,11 +147,6 @@ case "$OS_RELEASE_ID" in
             msg "Enabling container_manage_cgroup"
             showrun setsebool container_manage_cgroup true
         fi
-
-        # Test nftables driver, https://fedoraproject.org/wiki/Changes/NetavarkNftablesDefault
-        # We can drop this once this implemented and pushed into fedora stable. We cannot test it on
-        # debian because the netavark version there is way to old for nftables support.
-        printf "[network]\nfirewall_driver=\"nftables\"\n" > /etc/containers/containers.conf.d/90-nftables.conf
         ;;
     *) die_unknown OS_RELEASE_ID
 esac
@@ -285,6 +280,13 @@ case "$PRIV_NAME" in
     *) die_unknown PRIV_NAME
 esac
 
+# Root user namespace
+for which in uid gid;do
+    if ! grep -qE '^containers:' /etc/sub$which; then
+        echo 'containers:10000000:1048576' >>/etc/sub$which
+    fi
+done
+
 # FIXME! experimental workaround for #16973, the "lookup cdn03.quay.io" flake.
 #
 # If you are reading this on or after April 2023:
@@ -381,12 +383,11 @@ case "$TEST_FLAVOR" in
         ;;
     compose_v2)
         showrun dnf -y remove docker-compose
-        showrun curl -SL https://github.com/docker/compose/releases/download/v2.2.3/docker-compose-linux-x86_64 -o /usr/local/bin/docker-compose
+        showrun curl -SL https://github.com/docker/compose/releases/download/v2.32.3/docker-compose-linux-x86_64 -o /usr/local/bin/docker-compose
         showrun chmod +x /usr/local/bin/docker-compose
         ;& # Continue with next item
     apiv2)
         msg "Installing previously downloaded/cached packages"
-        showrun dnf install -y $PACKAGE_DOWNLOAD_DIR/python3*.rpm
         virtualenv .venv/requests
         source .venv/requests/bin/activate
         showrun pip install --upgrade pip
@@ -396,7 +397,7 @@ case "$TEST_FLAVOR" in
         showrun make .install.ginkgo
         ;&
     sys)
-        # when run nighlty check for system test leaks
+        # when run nightly check for system test leaks
         # shellcheck disable=SC2154
         if [[ "$CIRRUS_CRON" != '' ]]; then
             export PODMAN_BATS_LEAK_CHECK=1

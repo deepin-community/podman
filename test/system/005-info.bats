@@ -83,8 +83,24 @@ host.slirp4netns.executable | $expr_path
 }
 
 @test "podman info - confirm desired network backend" {
+    if [[ -z "$CI_DESIRED_NETWORK" ]]; then
+        # When running on RHEL, CI_DESIRED_NETWORK *must* be defined
+        # in gating.yaml because some versions of RHEL use CNI, some
+        # use netavark.
+        local osrelease=/etc/os-release
+        if [[ -e $osrelease ]]; then
+            local osname=$(source $osrelease; echo $NAME)
+            if [[ $osname =~ Red.Hat ]]; then
+                die "CI_DESIRED_NETWORK must be set in gating.yaml for RHEL testing"
+            fi
+        fi
+
+        # Everywhere other than RHEL, the only supported network is netavark
+        CI_DESIRED_NETWORK="netavark"
+    fi
+
     run_podman info --format '{{.Host.NetworkBackend}}'
-    is "$output" "netavark" "netavark backend"
+    is "$output" "$CI_DESIRED_NETWORK" ".Host.NetworkBackend"
 }
 
 @test "podman info - confirm desired database" {
@@ -164,6 +180,19 @@ host.slirp4netns.executable | $expr_path
     # storage-driver=vfs, until we have kernels that support rootless overlay
     # mounts.
     is "$output" ".*graphOptions: {}" "output includes graphOptions: {}"
+}
+
+@test "podman info - additional image stores" {
+    skip_if_remote "--storage-opt flag is not supported for remote"
+    driver=$(podman_storage_driver)
+    store1=$PODMAN_TMPDIR/store1
+    store2=$PODMAN_TMPDIR/store2
+    mkdir -p $store1 $store2
+    run_podman info --storage-opt=$driver'.imagestore='$store1 \
+                    --storage-opt=$driver'.imagestore='$store2 \
+                    --format '{{index .Store.GraphOptions "'$driver'.additionalImageStores"}}\n{{index .Store.GraphOptions "'$driver'.imagestore"}}'
+    assert "${lines[0]}" == "["$store1" "$store2"]" "output includes additional image stores"
+    assert "${lines[1]}" == "$store2" "old imagestore output"
 }
 
 @test "podman info netavark " {
@@ -274,6 +303,29 @@ EOF
            "with CI_DESIRED_DATABASE"
 
     run_podman $safe_opts system reset --force
+}
+
+@test "podman - empty string defaults for certain values" {
+    skip_if_remote "Test uses nonstandard paths for c/storage directories"
+
+    # We just want this to be empty - so graph driver will be set to the empty string
+    touch $PODMAN_TMPDIR/storage.conf
+
+    safe_opts=$(podman_isolation_opts ${PODMAN_TMPDIR})
+
+    # Force all custom directories so we don't pick up an existing database
+    CONTAINERS_STORAGE_CONF=$PODMAN_TMPDIR/storage.conf run_podman 0+w $safe_opts info
+    require_warning "The storage 'driver' option should be set" \
+       	            "c/storage should warn on empty storage driver"
+
+    # Now add a valid graph driver to storage.conf
+    cat >$PODMAN_TMPDIR/storage.conf <<EOF
+[storage]
+driver="$(podman_storage_driver)"
+EOF
+
+    # Second run of Podman should still succeed after editing the graph driver.
+    CONTAINERS_STORAGE_CONF=$PODMAN_TMPDIR/storage.conf run_podman $safe_opts info
 }
 
 # vim: filetype=sh

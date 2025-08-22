@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -52,6 +53,7 @@ import (
 	"github.com/containers/storage/pkg/unshare"
 	stypes "github.com/containers/storage/types"
 	securejoin "github.com/cyphar/filepath-securejoin"
+	"github.com/moby/sys/capability"
 	runcuser "github.com/moby/sys/user"
 	spec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/opencontainers/runtime-tools/generate"
@@ -176,6 +178,18 @@ func getOverlayUpperAndWorkDir(options []string) (string, string, error) {
 	}
 	return upperDir, workDir, nil
 }
+
+// hasCapSysResource returns whether the current process has CAP_SYS_RESOURCE.
+var hasCapSysResource = sync.OnceValues(func() (bool, error) {
+	currentCaps, err := capability.NewPid2(0)
+	if err != nil {
+		return false, err
+	}
+	if err = currentCaps.Load(); err != nil {
+		return false, err
+	}
+	return currentCaps.Get(capability.EFFECTIVE, capability.CAP_SYS_RESOURCE), nil
+})
 
 // Generate spec for a container
 // Accepts a map of the container's dependencies
@@ -662,7 +676,6 @@ func (c *Container) generateSpec(ctx context.Context) (s *spec.Spec, cleanupFunc
 	// setup rlimits
 	nofileSet := false
 	nprocSet := false
-	isRootless := rootless.IsRootless()
 	isRunningInUserNs := unshare.IsRootless()
 	if isRunningInUserNs && g.Config.Process != nil && g.Config.Process.OOMScoreAdj != nil {
 		var err error
@@ -671,18 +684,29 @@ func (c *Container) generateSpec(ctx context.Context) (s *spec.Spec, cleanupFunc
 			return nil, nil, err
 		}
 	}
-	if isRootless {
-		for _, rlimit := range c.config.Spec.Process.Rlimits {
-			if rlimit.Type == "RLIMIT_NOFILE" {
-				nofileSet = true
-			}
-			if rlimit.Type == "RLIMIT_NPROC" {
-				nprocSet = true
-			}
+	for _, rlimit := range c.config.Spec.Process.Rlimits {
+		if rlimit.Type == "RLIMIT_NOFILE" {
+			nofileSet = true
 		}
-		if !nofileSet {
-			max := rlimT(define.RLimitDefaultValue)
-			current := rlimT(define.RLimitDefaultValue)
+		if rlimit.Type == "RLIMIT_NPROC" {
+			nprocSet = true
+		}
+	}
+	needsClamping := false
+	if !nofileSet || !nprocSet {
+		needsClamping = isRunningInUserNs
+		if !needsClamping {
+			has, err := hasCapSysResource()
+			if err != nil {
+				return nil, nil, err
+			}
+			needsClamping = !has
+		}
+	}
+	if !nofileSet {
+		max := rlimT(define.RLimitDefaultValue)
+		current := rlimT(define.RLimitDefaultValue)
+		if needsClamping {
 			var rlimit unix.Rlimit
 			if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &rlimit); err != nil {
 				logrus.Warnf("Failed to return RLIMIT_NOFILE ulimit %q", err)
@@ -693,11 +717,13 @@ func (c *Container) generateSpec(ctx context.Context) (s *spec.Spec, cleanupFunc
 			if rlimT(rlimit.Max) < max {
 				max = rlimT(rlimit.Max)
 			}
-			g.AddProcessRlimits("RLIMIT_NOFILE", uint64(max), uint64(current))
 		}
-		if !nprocSet {
-			max := rlimT(define.RLimitDefaultValue)
-			current := rlimT(define.RLimitDefaultValue)
+		g.AddProcessRlimits("RLIMIT_NOFILE", uint64(max), uint64(current))
+	}
+	if !nprocSet {
+		max := rlimT(define.RLimitDefaultValue)
+		current := rlimT(define.RLimitDefaultValue)
+		if needsClamping {
 			var rlimit unix.Rlimit
 			if err := unix.Getrlimit(unix.RLIMIT_NPROC, &rlimit); err != nil {
 				logrus.Warnf("Failed to return RLIMIT_NPROC ulimit %q", err)
@@ -708,8 +734,8 @@ func (c *Container) generateSpec(ctx context.Context) (s *spec.Spec, cleanupFunc
 			if rlimT(rlimit.Max) < max {
 				max = rlimT(rlimit.Max)
 			}
-			g.AddProcessRlimits("RLIMIT_NPROC", uint64(max), uint64(current))
 		}
+		g.AddProcessRlimits("RLIMIT_NPROC", uint64(max), uint64(current))
 	}
 
 	c.addMaskedPaths(&g)
@@ -740,7 +766,7 @@ func (c *Container) isWorkDirSymlink(resolvedPath string) bool {
 			break
 		}
 		if resolvedSymlink != "" {
-			_, resolvedSymlinkWorkdir, err := c.resolvePath(c.state.Mountpoint, resolvedSymlink)
+			_, resolvedSymlinkWorkdir, _, err := c.resolvePath(c.state.Mountpoint, resolvedSymlink)
 			if isPathOnVolume(c, resolvedSymlinkWorkdir) || isPathOnMount(c, resolvedSymlinkWorkdir) {
 				// Resolved symlink exists on external volume or mount
 				return true
@@ -779,7 +805,7 @@ func (c *Container) resolveWorkDir() error {
 		return nil
 	}
 
-	_, resolvedWorkdir, err := c.resolvePath(c.state.Mountpoint, workdir)
+	_, resolvedWorkdir, _, err := c.resolvePath(c.state.Mountpoint, workdir)
 	if err != nil {
 		return err
 	}
@@ -2072,7 +2098,7 @@ rootless=%d
 		}
 	}
 
-	return c.makePlatformBindMounts()
+	return c.makeHostnameBindMount()
 }
 
 // createResolvConf create the resolv.conf file and bind mount it
@@ -2139,11 +2165,13 @@ func (c *Container) addResolvConf() error {
 		if len(networkNameServers) == 0 || networkBackend != string(types.Netavark) {
 			keepHostServers = true
 		}
-		// first add the nameservers from the networks status
-		nameservers = networkNameServers
-
-		// pasta and slirp4netns have a built in DNS forwarder.
-		nameservers = c.addSpecialDNS(nameservers)
+		if len(networkNameServers) > 0 {
+			// add the nameservers from the networks status
+			nameservers = networkNameServers
+		} else {
+			// pasta and slirp4netns have a built in DNS forwarder.
+			nameservers = c.addSpecialDNS(nameservers)
+		}
 	}
 
 	// Set DNS search domains
@@ -2306,26 +2334,42 @@ func (c *Container) addHosts() error {
 	}
 
 	var exclude []net.IP
+	var preferIP string
 	if c.pastaResult != nil {
 		exclude = c.pastaResult.IPAddresses
+		if len(c.pastaResult.MapGuestAddrIPs) > 0 {
+			// we used --map-guest-addr to setup pasta so prefer this address
+			preferIP = c.pastaResult.MapGuestAddrIPs[0]
+		}
 	} else if c.config.NetMode.IsBridge() {
 		// When running rootless we have to check the rootless netns ip addresses
 		// to not assign a ip that is already used in the rootless netns as it would
 		// not be routed to the host.
 		// https://github.com/containers/podman/issues/22653
 		info, err := c.runtime.network.RootlessNetnsInfo()
-		if err == nil {
+		if err == nil && info != nil {
 			exclude = info.IPAddresses
+			if len(info.MapGuestIps) > 0 {
+				// we used --map-guest-addr to setup pasta so prefer this address
+				preferIP = info.MapGuestIps[0]
+			}
 		}
 	}
 
+	hostContainersInternalIP := etchosts.GetHostContainersInternalIP(etchosts.HostContainersInternalOptions{
+		Conf:             c.runtime.config,
+		NetStatus:        c.state.NetworkStatus,
+		NetworkInterface: c.runtime.network,
+		Exclude:          exclude,
+		PreferIP:         preferIP,
+	})
+
 	return etchosts.New(&etchosts.Params{
-		BaseFile:     baseHostFile,
-		ExtraHosts:   c.config.HostAdd,
-		ContainerIPs: containerIPsEntries,
-		HostContainersInternalIP: etchosts.GetHostContainersInternalIPExcluding(
-			c.runtime.config, c.state.NetworkStatus, c.runtime.network, exclude),
-		TargetFile: targetFile,
+		BaseFile:                 baseHostFile,
+		ExtraHosts:               c.config.HostAdd,
+		ContainerIPs:             containerIPsEntries,
+		HostContainersInternalIP: hostContainersInternalIP,
+		TargetFile:               targetFile,
 	})
 }
 
@@ -2872,6 +2916,10 @@ func (c *Container) fixVolumePermissions(v *ContainerNamedVolume) error {
 	vol.lock.Lock()
 	defer vol.lock.Unlock()
 
+	return c.fixVolumePermissionsUnlocked(v, vol)
+}
+
+func (c *Container) fixVolumePermissionsUnlocked(v *ContainerNamedVolume, vol *Volume) error {
 	// The volume may need a copy-up. Check the state.
 	if err := vol.update(); err != nil {
 		return err
@@ -2944,7 +2992,11 @@ func (c *Container) fixVolumePermissions(v *ContainerNamedVolume) error {
 			return nil
 		}
 
-		st, err := os.Lstat(filepath.Join(c.state.Mountpoint, v.Dest))
+		finalPath, err := securejoin.SecureJoin(c.state.Mountpoint, v.Dest)
+		if err != nil {
+			return err
+		}
+		st, err := os.Lstat(finalPath)
 		if err == nil {
 			if stat, ok := st.Sys().(*syscall.Stat_t); ok {
 				uid, gid := int(stat.Uid), int(stat.Gid)

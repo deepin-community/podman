@@ -53,6 +53,8 @@ type MachineConfig struct {
 	Starting bool
 
 	Rosetta bool
+
+	Ansible *AnsibleConfig
 }
 
 type machineImage interface { //nolint:unused
@@ -79,10 +81,6 @@ func (o OCIMachineImage) download() error {
 
 type VMProvider interface { //nolint:interfacebloat
 	CreateVM(opts define.CreateVMOpts, mc *MachineConfig, builder *ignition.IgnitionBuilder) error
-	// GetDisk should be only temporary.  It is largely here only because WSL disk pulling is different
-	// TODO
-	// Let's deprecate this ASAP
-	GetDisk(userInputPath string, dirs *define.MachineDirs, mc *MachineConfig) error
 	PrepareIgnition(mc *MachineConfig, ignBuilder *ignition.IgnitionBuilder) (*ignition.ReadyUnitOpts, error)
 	Exists(name string) (bool, error)
 	MountType() VolumeMountType
@@ -151,4 +149,10 @@ type VMStats struct {
 	Created time.Time
 	// LastUp contains the last recorded uptime
 	LastUp time.Time
+}
+
+type AnsibleConfig struct {
+	PlaybookPath string
+	Contents     string
+	User         string
 }

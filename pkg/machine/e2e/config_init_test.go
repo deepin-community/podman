@@ -11,19 +11,21 @@ import (
 
 type initMachine struct {
 	/*
-	      --cpus uint              Number of CPUs (default 1)
-	      --disk-size uint         Disk size in GiB (default 100)
-	      --ignition-path string   Path to ignition file
-	      --username string        Username of the remote user (default "core" for FCOS, "user" for Fedora)
-	      --image-path string      Path to bootable image (default "testing")
-	  -m, --memory uint            Memory in MiB (default 2048)
-	      --now                    Start machine now
-	      --rootful                Whether this machine should prefer rootful container execution
-	      --timezone string        Set timezone (default "local")
-	  -v, --volume stringArray     Volumes to mount, source:target
-	      --volume-driver string   Optional volume driver
+			      --cpus uint              Number of CPUs (default 1)
+			      --disk-size uint         Disk size in GiB (default 100)
+			      --ignition-path string   Path to ignition file
+			      --username string        Username of the remote user (default "core" for FCOS, "user" for Fedora)
+			      --image-path string      Path to bootable image (default "testing")
+			  -m, --memory uint            Memory in MiB (default 2048)
+			      --now                    Start machine now
+			      --rootful                Whether this machine should prefer rootful container execution
+		          --playbook string        Run an ansible playbook after first boot
+			      --timezone string        Set timezone (default "local")
+			  -v, --volume stringArray     Volumes to mount, source:target
+			      --volume-driver string   Optional volume driver
 
 	*/
+	playbook           string
 	cpus               *uint
 	diskSize           *uint
 	ignitionPath       string
@@ -73,6 +75,9 @@ func (i *initMachine) buildCmd(m *machineTestBuilder) []string {
 	if i.rootful {
 		cmd = append(cmd, "--rootful")
 	}
+	if l := len(i.playbook); l > 0 {
+		cmd = append(cmd, "--playbook", i.playbook)
+	}
 	if i.userModeNetworking {
 		cmd = append(cmd, "--user-mode-networking")
 	}
@@ -88,6 +93,11 @@ func (i *initMachine) buildCmd(m *machineTestBuilder) []string {
 		// It would be much better if rm -f would behave like other commands and ignore not exists errors.
 		if session.ExitCode() == 125 {
 			if strings.Contains(session.errorToString(), "VM does not exist") {
+				return
+			}
+
+			// FIXME:#24344 work-around for custom ignition removal
+			if strings.Contains(session.errorToString(), "failed to remove machines files: unable to find connection named") {
 				return
 			}
 		}
@@ -144,6 +154,11 @@ func (i *initMachine) withVolume(v string) *initMachine {
 
 func (i *initMachine) withRootful(r bool) *initMachine {
 	i.rootful = r
+	return i
+}
+
+func (i *initMachine) withRunPlaybook(p string) *initMachine {
+	i.playbook = p
 	return i
 }
 

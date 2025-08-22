@@ -1,8 +1,11 @@
 package e2e_test
 
 import (
+	"archive/tar"
+	"bytes"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/url"
@@ -60,8 +63,6 @@ var _ = Describe("run basic podman commands", func() {
 	})
 
 	It("Volume ops", func() {
-		skipIfVmtype(define.HyperVVirt, "FIXME: #21036 - Hyper-V podman run -v fails due to path translation issues")
-
 		tDir, err := filepath.Abs(GinkgoT().TempDir())
 		Expect(err).ToNot(HaveOccurred())
 		roFile := filepath.Join(tDir, "attr-test-file")
@@ -88,6 +89,14 @@ var _ = Describe("run basic podman commands", func() {
 		runAlp, err := mb.setCmd(bm.withPodmanCommand([]string{"run", "-v", tDir + ":/test:Z", "quay.io/libpod/alpine_nginx", "ls", "/test/attr-test-file"})).run()
 		Expect(err).ToNot(HaveOccurred())
 		Expect(runAlp).To(Exit(0))
+
+		// Test build with --volume option
+		cf := filepath.Join(tDir, "Containerfile")
+		err = os.WriteFile(cf, []byte("FROM quay.io/libpod/alpine_nginx\nRUN ls /test/attr-test-file\n"), 0o644)
+		Expect(err).ToNot(HaveOccurred())
+		build, err := mb.setCmd(bm.withPodmanCommand([]string{"build", "-t", name, "-v", tDir + ":/test", tDir})).run()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(build).To(Exit(0))
 	})
 
 	It("Volume should be virtiofs", func() {
@@ -206,6 +215,127 @@ var _ = Describe("run basic podman commands", func() {
 		Expect(err).ToNot(HaveOccurred())
 		Expect(ls).To(Exit(0))
 		Expect(ls.outputToString()).To(ContainSubstring(testString))
+	})
+
+	It("podman build contexts", func() {
+		skipIfVmtype(define.HyperVVirt, "FIXME: #23429 - Error running podman build with option --build-context on Hyper-V")
+		skipIfVmtype(define.QemuVirt, "FIXME: #23433 - Additional build contexts should be sent as additional tar files")
+		name := randomString()
+		i := new(initMachine)
+		session, err := mb.setName(name).setCmd(i.withImage(mb.imagePath).withNow()).run()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(session).To(Exit(0))
+
+		mainContextDir := GinkgoT().TempDir()
+		cfile := filepath.Join(mainContextDir, "test1")
+		err = os.WriteFile(cfile, []byte(name), 0o644)
+		Expect(err).ToNot(HaveOccurred())
+
+		additionalContextDir := GinkgoT().TempDir()
+		cfile = filepath.Join(additionalContextDir, "test2")
+		err = os.WriteFile(cfile, []byte(name), 0o644)
+		Expect(err).ToNot(HaveOccurred())
+
+		cfile = filepath.Join(mainContextDir, "Containerfile")
+		err = os.WriteFile(cfile, []byte("FROM quay.io/libpod/alpine_nginx\nCOPY test1 /\nCOPY --from=test-context test2 /\n"), 0o644)
+		Expect(err).ToNot(HaveOccurred())
+
+		bm := basicMachine{}
+		build, err := mb.setCmd(bm.withPodmanCommand([]string{"build", "-t", name, "--build-context", "test-context=" + additionalContextDir, mainContextDir})).run()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(build).To(Exit(0))
+		Expect(build.outputToString()).To(ContainSubstring("COMMIT"))
+
+		run, err := mb.setCmd(bm.withPodmanCommand([]string{"run", name, "cat", "/test1"})).run()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(run).To(Exit(0))
+		Expect(build.outputToString()).To(ContainSubstring(name))
+
+		run, err = mb.setCmd(bm.withPodmanCommand([]string{"run", name, "cat", "/test2"})).run()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(run).To(Exit(0))
+		Expect(build.outputToString()).To(ContainSubstring(name))
+	})
+
+	It("Copy ops", func() {
+		var (
+			stdinDirectory = "stdin-dir"
+			stdinFile      = "file.txt"
+		)
+
+		now := time.Now()
+
+		tarBuffer := &bytes.Buffer{}
+		tw := tar.NewWriter(tarBuffer)
+
+		// Write a directory header to the tar
+		err := tw.WriteHeader(&tar.Header{
+			Name:       stdinDirectory,
+			Mode:       int64(0640 | fs.ModeDir),
+			Gid:        1000,
+			ModTime:    now,
+			ChangeTime: now,
+			AccessTime: now,
+			Typeflag:   tar.TypeDir,
+		})
+		Expect(err).ToNot(HaveOccurred())
+
+		// Write a file header to the tar
+		err = tw.WriteHeader(&tar.Header{
+			Name:       path.Join(stdinDirectory, stdinFile),
+			Mode:       0755,
+			Uid:        1000,
+			ModTime:    now,
+			ChangeTime: now,
+			AccessTime: now,
+		})
+		Expect(err).ToNot(HaveOccurred())
+
+		err = tw.Close()
+		Expect(err).ToNot(HaveOccurred())
+
+		name := randomString()
+		i := new(initMachine)
+		session, err := mb.setName(name).setCmd(i.withImage(mb.imagePath).withNow()).run()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(session).To(Exit(0))
+
+		bm := basicMachine{}
+		newImgs, err := mb.setCmd(bm.withPodmanCommand([]string{"pull", "quay.io/libpod/alpine_nginx"})).run()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(newImgs).To(Exit(0))
+		Expect(newImgs.outputToStringSlice()).To(HaveLen(1))
+
+		createAlp, err := mb.setCmd(bm.withPodmanCommand([]string{"create", "quay.io/libpod/alpine_nginx"})).run()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(createAlp).To(Exit(0))
+		Expect(createAlp.outputToStringSlice()).To(HaveLen(1))
+
+		// Testing stdin copy with archive mode disabled (ownership will be determined by the tar file)
+		containerID := createAlp.outputToStringSlice()[0]
+		cpTar, err := mb.setCmd(bm.withPodmanCommand([]string{"cp", "-a=false", "-", containerID + ":/tmp"})).setStdin(tarBuffer).run()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(cpTar).To(Exit(0))
+
+		start, err := mb.setCmd(bm.withPodmanCommand([]string{"start", containerID})).run()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(start).To(Exit(0))
+
+		// Check the directory is created with the appropriate mode, uid, gid
+		exec, err := mb.setCmd(bm.withPodmanCommand([]string{"exec", containerID, "stat", "-c", "%a %u %g", "/tmp/stdin-dir"})).run()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(exec).To(Exit(0))
+		execStdOut := exec.outputToStringSlice()
+		Expect(execStdOut).To(HaveLen(1))
+		Expect(execStdOut[0]).To(Equal("640 0 1000"))
+
+		// Check the file is created with the appropriate mode, uid, gid
+		exec, err = mb.setCmd(bm.withPodmanCommand([]string{"exec", containerID, "stat", "-c", "%a %u %g", "/tmp/stdin-dir/file.txt"})).run()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(exec).To(Exit(0))
+		execStdOut = exec.outputToStringSlice()
+		Expect(execStdOut).To(HaveLen(1))
+		Expect(execStdOut[0]).To(Equal("755 1000 0"))
 	})
 })
 

@@ -4,6 +4,7 @@
 #export DH_VERBOSE=1
 
 include /usr/share/dpkg/pkg-info.mk
+include /usr/share/dpkg/vendor.mk
 
 # cf. https://wiki.debian.org/ToolChain/LTO and https://github.com/golang/go/issues/45275
 export DEB_BUILD_MAINT_OPTIONS=optimize=-lto
@@ -12,7 +13,7 @@ export GO111MODULE=off
 
 export DH_GOLANG_GO_GENERATE := 1
 
-export DH_GOLANG_INSTALL_EXTRA := cni utils/testdata test/e2e/testdata pkg/trust/testdata
+export DH_GOLANG_INSTALL_EXTRA := test/e2e/testdata pkg/trust/testdata pkg/machine/compression/testdata
 
 export DH_GOLANG_EXCLUDES := \
 	contrib/perftest \
@@ -39,16 +40,13 @@ export DH_GOLANG_BUILDPKG := \
 export DH_GOLANG_TEST_EXCLUDES := $(DH_GOLANG_EXCLUDES) \
 	hack \
 	lock/file \
-	network/cni \
 	pkg/bindings \
 	pkg/machine \
 	podman/cmd/podman/common
 
 ## https://podman.io/getting-started/installation#build-tags
-BUILDTAGS := apparmor,seccomp,selinux,systemd,libsubid,cni
-BUILDTAGS_REMOTE := remote,exclude_graphdriver_btrfs,btrfs_noversion,exclude_graphdriver_devicemapper,containers_image_openpgp
-
-# containers_image_openpgp
+BUILDTAGS = apparmor seccomp selinux systemd libsubid
+BUILDTAGS_REMOTE = remote exclude_graphdriver_btrfs btrfs_noversion exclude_graphdriver_devicemapper containers_image_openpgp
 
 %:
 	dh $@ --buildsystem=golang --with=golang,bash-completion --builddirectory=_output
@@ -68,10 +66,12 @@ override_dh_auto_build:
 	$(MAKE) docs docker-docs GOMD2MAN=/usr/bin/go-md2man
 	DH_GOLANG_BUILDPKG="github.com/containers/podman/cmd/podman" \
 	dh_auto_build -v  --builddirectory=_output -- -tags "$(BUILDTAGS_REMOTE)" \
-          -ldflags "-X github.com/containers/podman/libpod/define.buildInfo=$(SOURCE_DATE_EPOCH)"
+          -ldflags "-X github.com/containers/podman/libpod/define.buildInfo=$(SOURCE_DATE_EPOCH) \
+                    -X github.com/containers/podman/libpod/define.buildOrigin=$(DEB_VENDOR)"
 	mv _output/bin/podman _output/bin/podman-remote
 	dh_auto_build -v  --builddirectory=_output -- -tags "$(BUILDTAGS)" \
-          -ldflags "-X github.com/containers/podman/libpod/define.buildInfo=$(SOURCE_DATE_EPOCH)"
+          -ldflags "-X github.com/containers/podman/libpod/define.buildInfo=$(SOURCE_DATE_EPOCH) \
+                    -X github.com/containers/podman/libpod/define.buildOrigin=$(DEB_VENDOR)"
 
 override_dh_auto_test:
 ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
@@ -114,14 +114,8 @@ execute_after_dh_installman:
 	rm -f --verbose $(CURDIR)/debian/podman-docker/usr/share/man/man1/dockersh.1*
 
 override_dh_installsystemd:
-ifeq (,$(filter uos Uos UOS,$(shell lsb_release  -i -s)))
-	dh_installsystemd
-	dh_installsystemd -ppodman --no-enable podman-auto-update.service
-	dh_installsystemd -ppodman --no-enable podman-restart.service
-	dh_installsystemd -ppodman --no-enable podman-auto-update.timer
-	dh_installsystemd -ppodman --no-enable podman-clean-transient.service
-else
-	dh_installsystemd
-	dh_installsystemd --name=podman-auto-update
-	dh_installsystemd --name=podman-restart
-endif
+	dh_installsystemd --no-enable --no-start
+
+override_dh_installsystemduser:
+	dh_installsystemduser --no-enable
+
