@@ -9,14 +9,13 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/containers/common/pkg/resize"
 	"github.com/containers/podman/v5/libpod/define"
 	"github.com/containers/podman/v5/libpod/events"
+	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/containers/storage/pkg/archive"
-	spec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 )
@@ -40,7 +39,10 @@ func (c *Container) Init(ctx context.Context, recursive bool) error {
 			return err
 		}
 	}
+	return c.initUnlocked(ctx, recursive)
+}
 
+func (c *Container) initUnlocked(ctx context.Context, recursive bool) error {
 	if !c.ensureState(define.ContainerStateConfigured, define.ContainerStateStopped, define.ContainerStateExited) {
 		return fmt.Errorf("container %s has already been created in runtime: %w", c.ID(), define.ErrCtrStateInvalid)
 	}
@@ -83,41 +85,31 @@ func (c *Container) Init(ctx context.Context, recursive bool) error {
 // Start requires that all dependency containers (e.g. pod infra containers) are
 // running before starting the container. The recursive parameter, if set, will start all
 // dependencies before starting this container.
-func (c *Container) Start(ctx context.Context, recursive bool) (finalErr error) {
-	if !c.batched {
-		c.lock.Lock()
-		defer c.lock.Unlock()
-
-		// defer's are executed LIFO so we are locked here
-		// as long as we call this after the defer unlock()
-		defer func() {
-			if finalErr != nil {
-				if err := saveContainerError(c, finalErr); err != nil {
-					logrus.Debug(err)
-				}
-			}
-		}()
-
-		if err := c.syncContainer(); err != nil {
-			return err
+func (c *Container) Start(ctx context.Context, recursive bool) error {
+	// Have to lock the pod the container is a part of.
+	// This prevents running `podman start` at the same time a
+	// `podman pod stop` is running, which could lead to weird races.
+	// Pod locks come before container locks, so do this first.
+	if c.config.Pod != "" {
+		// If we get an error, the pod was probably removed.
+		// So we get an expected ErrCtrRemoved instead of ErrPodRemoved,
+		// just ignore this and move on to syncing the container.
+		pod, _ := c.runtime.state.Pod(c.config.Pod)
+		if pod != nil {
+			pod.lock.Lock()
+			defer pod.lock.Unlock()
 		}
 	}
-	if err := c.prepareToStart(ctx, recursive); err != nil {
-		return err
-	}
 
-	// Start the container
-	if err := c.start(); err != nil {
-		return err
-	}
-	return c.waitForHealthy(ctx)
+	return c.startNoPodLock(ctx, recursive)
 }
 
 // Update updates the given container.
-// Either resource limits or restart policy can be updated.
-// Either resourcs or restartPolicy must not be nil.
+// Either resource limits, restart policies, or HealthCheck configuration can be updated.
+// Either resources, restartPolicy or changedHealthCheckConfiguration must not be nil in the updateOptions.
 // If restartRetries is not nil, restartPolicy must be set and must be "on-failure".
-func (c *Container) Update(resources *spec.LinuxResources, restartPolicy *string, restartRetries *uint) error {
+// Nil values of changedHealthCheckConfiguration are not updated.
+func (c *Container) Update(updateOptions *entities.ContainerUpdateOptions) error {
 	if !c.batched {
 		c.lock.Lock()
 		defer c.lock.Unlock()
@@ -131,7 +123,42 @@ func (c *Container) Update(resources *spec.LinuxResources, restartPolicy *string
 		return fmt.Errorf("container %s is being removed, cannot update: %w", c.ID(), define.ErrCtrStateInvalid)
 	}
 
-	return c.update(resources, restartPolicy, restartRetries)
+	healthCheckConfig, changedHealthCheck, err := GetNewHealthCheckConfig(&HealthCheckConfig{Schema2HealthConfig: c.HealthCheckConfig()}, *updateOptions.ChangedHealthCheckConfiguration)
+	if err != nil {
+		return err
+	}
+	if changedHealthCheck {
+		if err := c.updateHealthCheck(
+			healthCheckConfig,
+			&HealthCheckConfig{Schema2HealthConfig: c.config.HealthCheckConfig},
+		); err != nil {
+			return err
+		}
+	}
+
+	startupHealthCheckConfig, changedStartupHealthCheck, err := GetNewHealthCheckConfig(&StartupHealthCheckConfig{StartupHealthCheck: c.Config().StartupHealthCheckConfig}, *updateOptions.ChangedHealthCheckConfiguration)
+	if err != nil {
+		return err
+	}
+	if changedStartupHealthCheck {
+		if err := c.updateHealthCheck(
+			startupHealthCheckConfig,
+			&StartupHealthCheckConfig{StartupHealthCheck: c.config.StartupHealthCheckConfig},
+		); err != nil {
+			return err
+		}
+	}
+
+	globalHealthCheckOptions, err := updateOptions.ChangedHealthCheckConfiguration.GetNewGlobalHealthCheck()
+	if err != nil {
+		return err
+	}
+	if err := c.updateGlobalHealthCheckConfiguration(globalHealthCheckOptions); err != nil {
+		return err
+	}
+
+	defer c.newContainerEvent(events.Update)
+	return c.update(updateOptions)
 }
 
 // Attach to a container.
@@ -256,6 +283,21 @@ func (c *Container) Stop() error {
 // manually. If timeout is 0, SIGKILL will be used immediately to kill the
 // container.
 func (c *Container) StopWithTimeout(timeout uint) (finalErr error) {
+	// Have to lock the pod the container is a part of.
+	// This prevents running `podman stop` at the same time a
+	// `podman pod start` is running, which could lead to weird races.
+	// Pod locks come before container locks, so do this first.
+	if c.config.Pod != "" {
+		// If we get an error, the pod was probably removed.
+		// So we get an expected ErrCtrRemoved instead of ErrPodRemoved,
+		// just ignore this and move on to syncing the container.
+		pod, _ := c.runtime.state.Pod(c.config.Pod)
+		if pod != nil {
+			pod.lock.Lock()
+			defer pod.lock.Unlock()
+		}
+	}
+
 	if !c.batched {
 		c.lock.Lock()
 		defer c.lock.Unlock()
@@ -342,24 +384,35 @@ func (c *Container) HTTPAttach(r *http.Request, w http.ResponseWriter, streams *
 		close(hijackDone)
 	}()
 
+	locked := false
 	if !c.batched {
+		locked = true
 		c.lock.Lock()
+		defer func() {
+			if locked {
+				c.lock.Unlock()
+			}
+		}()
 		if err := c.syncContainer(); err != nil {
-			c.lock.Unlock()
-
 			return err
 		}
-		// We are NOT holding the lock for the duration of the function.
-		c.lock.Unlock()
 	}
-
-	if !c.ensureState(define.ContainerStateCreated, define.ContainerStateRunning) {
-		return fmt.Errorf("can only attach to created or running containers: %w", define.ErrCtrStateInvalid)
+	// For Docker compatibility, we need to re-initialize containers in these states.
+	if c.ensureState(define.ContainerStateConfigured, define.ContainerStateExited, define.ContainerStateStopped) {
+		if err := c.initUnlocked(r.Context(), c.config.Pod != ""); err != nil {
+			return fmt.Errorf("preparing container %s for attach: %w", c.ID(), err)
+		}
+	} else if !c.ensureState(define.ContainerStateCreated, define.ContainerStateRunning) {
+		return fmt.Errorf("can only attach to created or running containers - currently in state %s: %w", c.state.State.String(), define.ErrCtrStateInvalid)
 	}
 
 	if !streamAttach && !streamLogs {
 		return fmt.Errorf("must specify at least one of stream or logs: %w", define.ErrInvalidArg)
 	}
+
+	// We are NOT holding the lock for the duration of the function.
+	locked = false
+	c.lock.Unlock()
 
 	logrus.Infof("Performing HTTP Hijack attach to container %s", c.ID())
 
@@ -530,6 +583,8 @@ func (c *Container) Wait(ctx context.Context) (int32, error) {
 
 // WaitForExit blocks until the container exits and returns its exit code. The
 // argument is the interval at which checks the container's status.
+// If the argument is less than or equal to 0 Nanoseconds a default interval is
+// used.
 func (c *Container) WaitForExit(ctx context.Context, pollInterval time.Duration) (int32, error) {
 	id := c.ID()
 	if !c.valid {
@@ -541,119 +596,111 @@ func (c *Container) WaitForExit(ctx context.Context, pollInterval time.Duration)
 		}
 		return -1, define.ErrCtrRemoved
 	}
-	var conmonTimer time.Timer
-	conmonTimerSet := false
 
-	conmonPidFd := c.getConmonPidFd()
-	if conmonPidFd != -1 {
-		defer unix.Close(conmonPidFd)
-	}
-	conmonPidFdTriggered := false
-
-	getExitCode := func() (bool, int32, error) {
-		containerRemoved := false
-		if !c.batched {
-			c.lock.Lock()
-			defer c.lock.Unlock()
-		}
+	if !c.batched {
+		c.lock.Lock()
+		defer c.lock.Unlock()
 
 		if err := c.syncContainer(); err != nil {
-			if !errors.Is(err, define.ErrNoSuchCtr) {
-				return false, -1, err
-			}
-			containerRemoved = true
-		}
-
-		// If conmon is not alive anymore set a timer to make sure
-		// we're returning even if conmon has forcefully been killed.
-		if !conmonTimerSet && !containerRemoved {
-			conmonAlive, err := c.ociRuntime.CheckConmonRunning(c)
-			switch {
-			case errors.Is(err, define.ErrNoSuchCtr):
-				// Container has been removed, so we assume the
-				// exit code is present in the DB.
-				containerRemoved = true
-			case err != nil:
-				return false, -1, err
-			case !conmonAlive:
-				// Give the exit code at most 20 seconds to
-				// show up in the DB.  That should largely be
-				// enough for the cleanup process.
-				timerDuration := time.Second * 20
-				conmonTimer = *time.NewTimer(timerDuration)
-				conmonTimerSet = true
-			case conmonAlive:
-				// Continue waiting if conmon's still running.
-				return false, -1, nil
-			}
-		}
-
-		timedout := ""
-		if !containerRemoved {
-			// If conmon is dead for more than $timerDuration or if the
-			// container has exited properly, try to look up the exit code.
-			select {
-			case <-conmonTimer.C:
-				logrus.Debugf("Exceeded conmon timeout waiting for container %s to exit", id)
-				timedout = " [exceeded conmon timeout waiting for container to exit]"
-			default:
-				switch c.state.State {
-				case define.ContainerStateExited, define.ContainerStateConfigured:
-					// Container exited, so we can look up the exit code.
-				case define.ContainerStateStopped:
-					// Continue looping unless the restart policy is always.
-					// In this case, the container would never transition to
-					// the exited state, so we need to look up the exit code.
-					if c.config.RestartPolicy != define.RestartPolicyAlways {
-						return false, -1, nil
-					}
-				default:
-					// Continue looping
-					return false, -1, nil
+			if errors.Is(err, define.ErrNoSuchCtr) || errors.Is(err, define.ErrCtrRemoved) {
+				// if the container is not valid at this point as it was deleted,
+				// check if the exit code was recorded in the db.
+				exitCode, err := c.runtime.state.GetContainerExitCode(id)
+				if err == nil {
+					return exitCode, nil
 				}
 			}
+			return -1, err
 		}
+	}
 
+	conmonPID := c.state.ConmonPID
+	// conmonPID == 0 means container is not running
+	if conmonPID == 0 {
 		exitCode, err := c.runtime.state.GetContainerExitCode(id)
 		if err != nil {
 			if errors.Is(err, define.ErrNoSuchExitCode) {
 				// If the container is configured or created, we must assume it never ran.
 				if c.ensureState(define.ContainerStateConfigured, define.ContainerStateCreated) {
-					return true, 0, nil
+					return 0, nil
 				}
 			}
-			return true, -1, fmt.Errorf("%w (container in state %s)%s", err, c.state.State, timedout)
+			return -1, err
 		}
-
-		return true, exitCode, nil
+		return exitCode, nil
 	}
 
-	for {
-		hasExited, exitCode, err := getExitCode()
-		if hasExited {
-			return exitCode, err
+	conmonPidFd := c.getConmonPidFd()
+	if conmonPidFd > -1 {
+		defer unix.Close(conmonPidFd)
+	}
+
+	if pollInterval <= 0 {
+		pollInterval = DefaultWaitInterval
+	}
+
+	// we cannot wait locked as we would hold the lock forever, so we unlock and then lock again
+	c.lock.Unlock()
+	err := waitForConmonExit(ctx, conmonPID, conmonPidFd, pollInterval)
+	c.lock.Lock()
+	if err != nil {
+		return -1, fmt.Errorf("failed to wait for conmon to exit: %w", err)
+	}
+
+	// we locked again so we must sync the state
+	if err := c.syncContainer(); err != nil {
+		if errors.Is(err, define.ErrNoSuchCtr) || errors.Is(err, define.ErrCtrRemoved) {
+			// if the container is not valid at this point as it was deleted,
+			// check if the exit code was recorded in the db.
+			exitCode, err := c.runtime.state.GetContainerExitCode(id)
+			if err == nil {
+				return exitCode, nil
+			}
 		}
-		if err != nil {
-			return -1, err
+		return -1, err
+	}
+
+	// syncContainer already did the exit file read so nothing extra for us to do here
+	return c.runtime.state.GetContainerExitCode(id)
+}
+
+func waitForConmonExit(ctx context.Context, conmonPID, conmonPidFd int, pollInterval time.Duration) error {
+	if conmonPidFd > -1 {
+		for {
+			fds := []unix.PollFd{{Fd: int32(conmonPidFd), Events: unix.POLLIN}}
+			if n, err := unix.Poll(fds, int(pollInterval.Milliseconds())); err != nil {
+				if err == unix.EINTR {
+					continue
+				}
+				return err
+			} else if n == 0 {
+				// n == 0 means timeout
+				select {
+				case <-ctx.Done():
+					return define.ErrCanceled
+				default:
+					// context not done, wait again
+					continue
+				}
+			}
+			return nil
+		}
+	}
+	// no pidfd support, we must poll the pid
+	for {
+		if err := unix.Kill(conmonPID, 0); err != nil {
+			if err == unix.ESRCH {
+				break
+			}
+			return err
 		}
 		select {
 		case <-ctx.Done():
-			return -1, fmt.Errorf("waiting for exit code of container %s canceled", id)
-		default:
-			if conmonPidFd != -1 && !conmonPidFdTriggered {
-				// If possible (pidfd works), the first cycle we block until conmon dies
-				// If this happens, and we fall back to the old poll delay
-				// There is a deadlock in the cleanup code for "play kube" which causes
-				// conmon to not exit, so unfortunately we have to use the poll interval
-				// timeout here to avoid hanging.
-				fds := []unix.PollFd{{Fd: int32(conmonPidFd), Events: unix.POLLIN}}
-				_, _ = unix.Poll(fds, int(pollInterval.Milliseconds()))
-				conmonPidFdTriggered = true
-			} else {
-				time.Sleep(pollInterval)
-			}
+			return define.ErrCanceled
+		case <-time.After(pollInterval):
 		}
 	}
+	return nil
 }
 
 type waitResult struct {
@@ -706,27 +753,34 @@ func (c *Container) WaitForConditionWithInterval(ctx context.Context, waitTimeou
 		}
 	}
 
-	var wg sync.WaitGroup
-
 	if waitForExit {
-		wg.Add(1)
 		go func() {
-			defer wg.Done()
-
 			code, err := c.WaitForExit(ctx, waitTimeout)
 			trySend(code, err)
 		}()
 	}
 
 	if len(wantedStates) > 0 || len(wantedHealthStates) > 0 {
-		wg.Add(1)
 		go func() {
-			defer wg.Done()
 			stoppedCount := 0
 			for {
 				if len(wantedStates) > 0 {
 					state, err := c.State()
 					if err != nil {
+						// If the we wait for removing and the container is removed do not return this as error.
+						// This allows callers to actually wait for the ctr to be removed.
+						if wantedStates[define.ContainerStateRemoving] &&
+							(errors.Is(err, define.ErrNoSuchCtr) || errors.Is(err, define.ErrCtrRemoved)) {
+							// check if the exit code was recorded in the db to return it
+							exitCode, err := c.runtime.state.GetContainerExitCode(c.ID())
+							if err == nil {
+								trySend(exitCode, nil)
+								return
+							}
+
+							trySend(-1, nil)
+							return
+						}
 						trySend(-1, err)
 						return
 					}
@@ -784,13 +838,14 @@ func (c *Container) WaitForConditionWithInterval(ctx context.Context, waitTimeou
 	case <-ctx.Done():
 		result = waitResult{-1, define.ErrCanceled}
 	}
-	wg.Wait()
 	return result.code, result.err
 }
 
 // Cleanup unmounts all mount points in container and cleans up container storage
-// It also cleans up the network stack
-func (c *Container) Cleanup(ctx context.Context) error {
+// It also cleans up the network stack.
+// onlyStopped is set by the podman container cleanup to ensure we only cleanup a stopped container,
+// all other states mean another process already called cleanup before us which is fine in such cases.
+func (c *Container) Cleanup(ctx context.Context, onlyStopped bool) error {
 	if !c.batched {
 		c.lock.Lock()
 		defer c.lock.Unlock()
@@ -808,55 +863,7 @@ func (c *Container) Cleanup(ctx context.Context) error {
 		}
 	}
 
-	// Check if state is good
-	if !c.ensureState(define.ContainerStateConfigured, define.ContainerStateCreated, define.ContainerStateStopped, define.ContainerStateStopping, define.ContainerStateExited) {
-		return fmt.Errorf("container %s is running or paused, refusing to clean up: %w", c.ID(), define.ErrCtrStateInvalid)
-	}
-
-	// if the container was not created in the oci runtime or was already cleaned up, then do nothing
-	if c.ensureState(define.ContainerStateConfigured, define.ContainerStateExited) {
-		return nil
-	}
-
-	// Handle restart policy.
-	// Returns a bool indicating whether we actually restarted.
-	// If we did, don't proceed to cleanup - just exit.
-	didRestart, err := c.handleRestartPolicy(ctx)
-	if err != nil {
-		return err
-	}
-	if didRestart {
-		return nil
-	}
-
-	// If we didn't restart, we perform a normal cleanup
-
-	// make sure all the container processes are terminated if we are running without a pid namespace.
-	hasPidNs := false
-	if c.config.Spec.Linux != nil {
-		for _, i := range c.config.Spec.Linux.Namespaces {
-			if i.Type == spec.PIDNamespace {
-				hasPidNs = true
-				break
-			}
-		}
-	}
-	if !hasPidNs {
-		// do not fail on errors
-		_ = c.ociRuntime.KillContainer(c, uint(unix.SIGKILL), true)
-	}
-
-	// Check for running exec sessions
-	sessions, err := c.getActiveExecSessions()
-	if err != nil {
-		return err
-	}
-	if len(sessions) > 0 {
-		return fmt.Errorf("container %s has active exec sessions, refusing to clean up: %w", c.ID(), define.ErrCtrStateInvalid)
-	}
-
-	defer c.newContainerEvent(events.Cleanup)
-	return c.cleanup(ctx)
+	return c.fullCleanup(ctx, onlyStopped)
 }
 
 // Batch starts a batch operation on the given container

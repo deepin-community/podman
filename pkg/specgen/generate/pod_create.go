@@ -38,12 +38,14 @@ func MakePod(p *entities.PodSpec, rt *libpod.Runtime) (_ *libpod.Pod, finalErr e
 	}
 
 	if !p.PodSpecGen.NoInfra {
-		imageName, err := PullOrBuildInfraImage(rt, p.PodSpecGen.InfraImage)
+		imageName, err := PullInfraImage(rt, p.PodSpecGen.InfraImage)
 		if err != nil {
 			return nil, err
 		}
-		p.PodSpecGen.InfraImage = imageName
-		p.PodSpecGen.InfraContainerSpec.RawImageName = imageName
+		if len(imageName) > 0 {
+			p.PodSpecGen.InfraImage = imageName
+			p.PodSpecGen.InfraContainerSpec.RawImageName = imageName
+		}
 	}
 
 	spec, err := MapSpec(&p.PodSpecGen)
@@ -85,6 +87,7 @@ func MakePod(p *entities.PodSpec, rt *libpod.Runtime) (_ *libpod.Pod, finalErr e
 		// make sure of that here.
 		p.PodSpecGen.InfraContainerSpec.ResourceLimits = nil
 		p.PodSpecGen.InfraContainerSpec.WeightDevice = nil
+
 		rtSpec, spec, opts, err := MakeContainer(context.Background(), rt, p.PodSpecGen.InfraContainerSpec, false, nil)
 		if err != nil {
 			return nil, err
@@ -237,6 +240,9 @@ func MapSpec(p *specgen.PodSpecGenerator) (*specgen.SpecGenerator, error) {
 	if len(p.HostAdd) > 0 {
 		spec.HostAdd = p.HostAdd
 	}
+	if len(p.HostsFile) > 0 {
+		spec.BaseHostsFile = p.HostsFile
+	}
 	if len(p.DNSServer) > 0 {
 		var dnsServers []net.IP
 		dnsServers = append(dnsServers, p.DNSServer...)
@@ -262,6 +268,9 @@ func MapSpec(p *specgen.PodSpecGenerator) (*specgen.SpecGenerator, error) {
 	}
 	if p.NoManageHosts {
 		spec.UseImageHosts = &p.NoManageHosts
+	}
+	if p.NoManageHostname {
+		spec.UseImageHostname = &p.NoManageHostname
 	}
 
 	if len(p.InfraConmonPidFile) > 0 {

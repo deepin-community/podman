@@ -5,7 +5,7 @@
 
 load helpers
 
-# bats test_tags=distro-integration
+# bats test_tags=distro-integration, ci:parallel
 @test "podman exec - basic test" {
     rand_filename=$(random_string 20)
     rand_content=$(random_string 50)
@@ -56,19 +56,24 @@ load helpers
     run_podman run -td $IMAGE /bin/sh
     cid="$output"
 
-    is "$(check_exec_pid)" "" "exec pid hash file indeed doesn't exist"
+    is "$(find_exec_pid_files)" "" "exec pid hash file indeed doesn't exist"
 
     for i in {1..3}; do
         run_podman exec $cid /bin/true
     done
 
-    is "$(check_exec_pid)" "" "there isn't any exec pid hash file leak"
+    is "$(find_exec_pid_files)" "" "there isn't any exec pid hash file leak"
+
+    # Ensure file is there while container is running
+    run_podman exec -d $cid sleep 5
+    is "$(find_exec_pid_files)" '.*containers.*exec_pid' "exec_pid file found"
 
     run_podman rm -t 0 -f $cid
 }
 
 # Issue #4785 - piping to exec statement - fixed in #4818
 # Issue #5046 - piping to exec truncates results (actually a conmon issue)
+# bats test_tags=ci:parallel
 @test "podman exec - cat from stdin" {
     run_podman run -d $IMAGE top
     cid="$output"
@@ -95,6 +100,7 @@ load helpers
 }
 
 # #6829 : add username to /etc/passwd inside container if --userns=keep-id
+# bats test_tags=ci:parallel
 @test "podman exec - with keep-id" {
     skip_if_not_rootless "--userns=keep-id only works in rootless mode"
     # Multiple --userns options confirm command-line override (last one wins)
@@ -109,6 +115,7 @@ load helpers
 }
 
 # #11496: podman-remote loses output
+# bats test_tags=ci:parallel
 @test "podman exec/run - missing output" {
     local bigfile=${PODMAN_TMPDIR}/bigfile
     local newfile=${PODMAN_TMPDIR}/newfile
@@ -136,6 +143,7 @@ load helpers
     run_podman rm -t 0 -f $cid
 }
 
+# bats test_tags=ci:parallel
 @test "podman run umask" {
     umask="0724"
     run_podman run --rm -q $IMAGE grep Umask /proc/self/status
@@ -162,6 +170,7 @@ load helpers
     run_podman rm -f -t0 $cid
 }
 
+# bats test_tags=ci:parallel
 @test "podman exec --tty" {
     # Run all tests, report failures at end
     defer-assertion-failures
@@ -173,7 +182,8 @@ load helpers
             if [[ -n "$run_term_env" ]]; then
                 run_opt_env="--env=TERM=$run_term_env"
             fi
-            run_podman run -d $run_opt_t $run_opt_env --name test $IMAGE top
+            cname="c-${run_opt_t}-${run_term_env}-$(safename)"
+            run_podman run -d $run_opt_t $run_opt_env --name $cname $IMAGE top
 
             # Inner loops: different variations on EXEC
             for exec_opt_t in "" "-t"; do
@@ -196,16 +206,17 @@ load helpers
                     fi
 
                     local desc="run $run_opt_t $run_opt_env, exec $exec_opt_t $exec_opt_env"
-                    TERM=exec-term run_podman exec $exec_opt_t $exec_opt_env test sh -c 'echo -n $TERM'
+                    TERM=exec-term run_podman exec $exec_opt_t $exec_opt_env $cname sh -c 'echo -n $TERM'
                     assert "$output" = "$expected" "$desc"
                 done
             done
 
-            run_podman rm -f -t0 test
+            run_podman rm -f -t0 $cname
         done
     done
 }
 
+# bats test_tags=ci:parallel
 @test "podman exec - does not leak session IDs on invalid command" {
     run_podman run -d $IMAGE top
     cid="$output"
@@ -222,6 +233,7 @@ load helpers
 }
 
 # 'exec --preserve-fd' passes a list of additional file descriptors into the container
+# bats test_tags=ci:parallel
 @test "podman exec --preserve-fd" {
     skip_if_remote "preserve-fd is meaningless over remote"
 
@@ -245,4 +257,60 @@ load helpers
     run_podman rm -f -t0 $cid
 }
 
+# bats test_tags=ci:parallel
+@test "podman exec - additional groups" {
+    run_podman run -d $IMAGE top
+    cid="$output"
+
+    run_podman exec $cid id -g nobody
+    nobody_id="$output"
+
+    run_podman exec $cid grep -h ^Groups: /proc/1/status /proc/self/status
+    assert "${lines[0]}" = "${lines[1]}" "must have the same additional groups"
+
+    run_podman exec --user root $cid grep -h ^Groups: /proc/1/status /proc/self/status
+    assert "${lines[0]}" = "${lines[1]}" "must have the same additional groups"
+
+    run_podman exec --user root:root $cid id -G
+    assert "${output}" = "0" "must have only 0 gid"
+
+    run_podman exec --user nobody $cid id -G
+    assert "${output}" = "${nobody_id}" "must have only nobody gid"
+
+    run_podman exec --user nobody:nobody $cid id -G
+    assert "${output}" = "${nobody_id}" "must have only nobody gid"
+
+    run_podman rm -f -t0 $cid
+
+    # Now test with --group-add
+
+    run_podman run --group-add 1,2,3,4,5,6,7,8,9,10 -d $IMAGE top
+    cid="$output"
+
+    run_podman exec $cid grep -h ^Groups: /proc/1/status /proc/self/status
+    assert "${lines[0]}" = "${lines[1]}" "must have the same additional groups"
+
+    run_podman exec --user 0 $cid grep -h ^Groups: /proc/1/status /proc/self/status
+    assert "${lines[0]}" = "${lines[1]}" "must have the same additional groups"
+
+    run_podman exec --user root $cid grep -h ^Groups: /proc/1/status /proc/self/status
+    assert "${lines[0]}" = "${lines[1]}" "must have the same additional groups"
+
+    run_podman exec --user root:root $cid id -G
+    assert "$output" = "0 1 2 3 4 5 6 7 8 9 10" "must have only the explicit groups added and 0"
+
+    run_podman exec --user 0:0 $cid id -G
+    assert "$output" = "0 1 2 3 4 5 6 7 8 9 10" "must have only the explicit groups added and 0"
+
+    run_podman exec --user nobody $cid id -G
+    assert "$output" = "$nobody_id 1 2 3 4 5 6 7 8 9 10" "must have only the explicit groups added and nobody"
+
+    run_podman exec --user nobody:nobody $cid id -G
+    assert "$output" = "$nobody_id 1 2 3 4 5 6 7 8 9 10" "must have only the explicit groups added and nobody"
+
+    run_podman exec --user root:nobody $cid id -G
+    assert "$output" = "$nobody_id 1 2 3 4 5 6 7 8 9 10" "must have only the explicit groups added and 0"
+
+    run_podman rm -f -t0 $cid
+}
 # vim: filetype=sh

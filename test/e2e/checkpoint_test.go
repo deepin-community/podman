@@ -332,6 +332,7 @@ var _ = Describe("Podman checkpoint", func() {
 	})
 
 	It("podman checkpoint container with established tcp connections", func() {
+		Skip("FIXME: #26289 - Rawhide only issue, skip for now")
 		localRunString := getRunString([]string{REDIS_IMAGE})
 		session := podmanTest.Podman(localRunString)
 		session.WaitWithDefaultTimeout()
@@ -711,12 +712,13 @@ var _ = Describe("Podman checkpoint", func() {
 		session := podmanTest.Podman([]string{"run", "--network=none", "-d", "--rm", ALPINE, "top"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
-		Expect(podmanTest.NumberOfContainersRunning()).To(Equal(1))
+		Expect(podmanTest.NumberOfContainersRunning()).To(Equal(1), "# of running containers at start")
 		cid := session.OutputToString()
 		fileName := filepath.Join(podmanTest.TempDir, "/checkpoint-"+cid+".tar.gz")
 
 		// Change the container's root file-system
-		result := podmanTest.Podman([]string{"exec", cid, "/bin/sh", "-c", "echo test" + cid + "test > /test.output"})
+		signalFile := "/test.output"
+		result := podmanTest.Podman([]string{"exec", cid, "touch", signalFile})
 		result.WaitWithDefaultTimeout()
 		Expect(result).Should(ExitCleanly())
 
@@ -725,23 +727,32 @@ var _ = Describe("Podman checkpoint", func() {
 		result.WaitWithDefaultTimeout()
 
 		Expect(result).Should(ExitCleanly())
-		Expect(result.OutputToString()).To(ContainSubstring(cid))
-		Expect(podmanTest.NumberOfContainersRunning()).To(Equal(0))
-		Expect(podmanTest.NumberOfContainers()).To(Equal(0))
+		Expect(result.OutputToString()).To(Equal(cid), "checkpoint output")
+		// Allow a few seconds for --rm to take effect
+		ncontainers := podmanTest.NumberOfContainers()
+		for try := 0; try < 4; try++ {
+			if ncontainers == 0 {
+				break
+			}
+			time.Sleep(time.Second)
+			ncontainers = podmanTest.NumberOfContainers()
+		}
+		Expect(ncontainers).To(Equal(0), "# of containers (total) after checkpoint")
 
 		// Restore the container
 		result = podmanTest.Podman([]string{"container", "restore", "--ignore-rootfs", "-i", fileName})
 		result.WaitWithDefaultTimeout()
-
 		Expect(result).Should(ExitCleanly())
-		Expect(podmanTest.NumberOfContainersRunning()).To(Equal(1))
-		Expect(podmanTest.NumberOfContainers()).To(Equal(1))
-		Expect(podmanTest.GetContainerStatus()).To(ContainSubstring("Up"))
+
+		runCheck := podmanTest.Podman([]string{"ps", "-a", "--noheading", "--no-trunc", "--format", "{{.ID}} {{.State}}"})
+		runCheck.WaitWithDefaultTimeout()
+		Expect(runCheck).Should(ExitCleanly())
+		Expect(runCheck.OutputToString()).To(Equal(cid+" running"), "podman ps, after restore")
 
 		// Verify the changes to the container's root file-system
-		result = podmanTest.Podman([]string{"exec", cid, "cat", "/test.output"})
+		result = podmanTest.Podman([]string{"exec", cid, "cat", signalFile})
 		result.WaitWithDefaultTimeout()
-		Expect(result).Should(ExitWithError(1, "cat: can't open '/test.output': No such file or directory"))
+		Expect(result).Should(ExitWithError(1, "cat: can't open '"+signalFile+"': No such file or directory"))
 
 		// Remove exported checkpoint
 		os.Remove(fileName)
@@ -967,6 +978,10 @@ var _ = Describe("Podman checkpoint", func() {
 	})
 
 	It("podman checkpoint container with --pre-checkpoint", func() {
+		if podmanTest.Host.Arch == "arm64" {
+			Skip("skip on arm64/aarch64, https://github.com/checkpoint-restore/criu/issues/2676")
+		}
+		SkipIfContainerized("FIXME: #24230 - no longer works in container testing")
 		if !criu.MemTrack() {
 			Skip("system (architecture/kernel/CRIU) does not support memory tracking")
 		}
@@ -999,6 +1014,10 @@ var _ = Describe("Podman checkpoint", func() {
 	})
 
 	It("podman checkpoint container with --pre-checkpoint and export (migration)", func() {
+		if podmanTest.Host.Arch == "arm64" {
+			Skip("skip on arm64/aarch64, https://github.com/checkpoint-restore/criu/issues/2676")
+		}
+		SkipIfContainerized("FIXME: #24230 - no longer works in container testing")
 		SkipIfRemote("--import-previous is not yet supported on the remote client")
 		if !criu.MemTrack() {
 			Skip("system (architecture/kernel/CRIU) does not support memory tracking")
@@ -1043,6 +1062,7 @@ var _ = Describe("Podman checkpoint", func() {
 	})
 
 	It("podman checkpoint and restore container with different port mappings", func() {
+		Skip("FIXME: #26289 - Rawhide only issue, skip for now")
 		randomPort, err := utils.GetRandomPort()
 		Expect(err).ShouldNot(HaveOccurred())
 		localRunString := getRunString([]string{"-p", fmt.Sprintf("%d:6379", randomPort), "--rm", REDIS_IMAGE})
@@ -1118,10 +1138,8 @@ var _ = Describe("Podman checkpoint", func() {
 			share,
 		)
 
-		share := share // copy into local scope, for use inside function
-		index := index
-
 		It(testName, func() {
+			Skip("FIXME: #24571 - not working an super flaky, don't waste CI time on it")
 			podName := "test_pod"
 
 			if err := criu.CheckForCriu(criu.PodCriuVersion); err != nil {
@@ -1348,6 +1366,7 @@ var _ = Describe("Podman checkpoint", func() {
 	})
 
 	It("podman checkpoint and restore containers with --print-stats", func() {
+		Skip("FIXME: #26289 - Rawhide only issue, skip for now")
 		session1 := podmanTest.Podman(getRunString([]string{REDIS_IMAGE}))
 		session1.WaitWithDefaultTimeout()
 		Expect(session1).Should(ExitCleanly())
@@ -1550,8 +1569,8 @@ var _ = Describe("Podman checkpoint", func() {
 		// Prevent --runtime arg from being set to force using default
 		// runtime unless explicitly set through passed args.
 		preservedMakeOptions := podmanTest.PodmanMakeOptions
-		podmanTest.PodmanMakeOptions = func(args []string, noEvents, noCache bool) []string {
-			defaultArgs := preservedMakeOptions(args, noEvents, noCache)
+		podmanTest.PodmanMakeOptions = func(args []string, options PodmanExecOptions) []string {
+			defaultArgs := preservedMakeOptions(args, options)
 			for i := range args {
 				// Runtime is set explicitly, so we should keep --runtime arg.
 				if args[i] == "--runtime" {

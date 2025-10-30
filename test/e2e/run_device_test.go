@@ -3,19 +3,29 @@
 package integration
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	. "github.com/containers/podman/v5/test/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
 
-func createContainersConfFileWithDevices(pTest *PodmanTestIntegration, devices string) {
+func createContainersConfFileWithDevices(pTest *PodmanTestIntegration, devices string, cdiSpecDirs []string) {
 	configPath := filepath.Join(pTest.TempDir, "containers.conf")
 	containersConf := []byte(fmt.Sprintf("[containers]\ndevices = [%s]\n", devices))
+	if len(cdiSpecDirs) > 0 {
+		quoted := make([]string, len(cdiSpecDirs))
+		for i, dir := range cdiSpecDirs {
+			quoted[i] = fmt.Sprintf("%q", dir)
+		}
+		containersConf = append(containersConf, []byte(fmt.Sprintf("[engine]\ncdi_spec_dirs = [%s]\n", strings.Join(quoted, ", ")))...)
+	}
 	err := os.WriteFile(configPath, containersConf, os.ModePerm)
 	Expect(err).ToNot(HaveOccurred())
 
@@ -40,7 +50,10 @@ var _ = Describe("Podman run device", func() {
 		Expect(session).Should(ExitCleanly())
 		if !isRootless() {
 			// Kernel 6.9.0 (2024-03) requires SYSLOG
-			session = podmanTest.Podman([]string{"run", "-q", "--security-opt", "label=disable", "--device", "/dev/kmsg", "--cap-add", "SYS_ADMIN,SYSLOG", ALPINE, "head", "-n", "1", "/dev/kmsg"})
+			// Do not read any data from the device (thus the -n 0), because there is a rare race condition that happens
+			// when another writes to the ring buffer when the device is already opened and that causes the following test
+			// to fail: https://github.com/containers/podman/issues/23882.
+			session = podmanTest.Podman([]string{"run", "-q", "--security-opt", "label=disable", "--device", "/dev/kmsg", "--cap-add", "SYS_ADMIN,SYSLOG", ALPINE, "head", "-n", "0", "/dev/kmsg"})
 			session.WaitWithDefaultTimeout()
 			Expect(session).Should(ExitCleanly())
 		}
@@ -103,7 +116,7 @@ var _ = Describe("Podman run device", func() {
 	It("podman run CDI device test", func() {
 		SkipIfRootless("Rootless will not be able to create files/folders in /etc")
 		cdiDir := "/etc/cdi"
-		if _, err := os.Stat(cdiDir); os.IsNotExist(err) {
+		if _, err := os.Stat(cdiDir); errors.Is(err, fs.ErrNotExist) {
 			Expect(os.MkdirAll(cdiDir, os.ModePerm)).To(Succeed())
 		}
 		defer os.RemoveAll(cdiDir)
@@ -116,16 +129,38 @@ var _ = Describe("Podman run device", func() {
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 
-		createContainersConfFileWithDevices(podmanTest, "\"vendor.com/device=myKmsg\"")
+		createContainersConfFileWithDevices(podmanTest, "\"vendor.com/device=myKmsg\"", []string{})
+		session = podmanTest.Podman([]string{"run", "-q", "--security-opt", "label=disable", ALPINE, "test", "-c", "/dev/kmsg1"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+	})
+
+	It("podman run CDI device test with --cdi-spec-dir", func() {
+		SkipIfRemote("The --cdi-spec-dir only works locally.")
+		cdiDir := podmanTest.TempDir + "/cdi"
+		Expect(os.MkdirAll(cdiDir, os.ModePerm)).To(Succeed())
+
+		cmd := exec.Command("cp", "cdi/device.json", cdiDir)
+		err = cmd.Run()
+		Expect(err).ToNot(HaveOccurred())
+
+		session := podmanTest.Podman([]string{"run", "--cdi-spec-dir", cdiDir, "-q", "--security-opt", "label=disable", "--device", "vendor.com/device=myKmsg", ALPINE, "test", "-c", "/dev/kmsg1"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+
+		createContainersConfFileWithDevices(podmanTest, "\"vendor.com/device=myKmsg\"", []string{cdiDir})
 		session = podmanTest.Podman([]string{"run", "-q", "--security-opt", "label=disable", ALPINE, "test", "-c", "/dev/kmsg1"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 	})
 
 	It("podman run cannot access non default devices", func() {
-		session := podmanTest.Podman([]string{"run", "-v /dev:/dev-host", ALPINE, "head", "-1", "/dev-host/kmsg"})
+		// Unlikely to happen but do not read any data from the device (thus the -n 0), because there is a rare
+		// race condition that happens so the test would fail for the rare race condition instead of a failure
+		// reported by open(). More details: https://github.com/containers/podman/issues/23882.
+		session := podmanTest.Podman([]string{"run", "-v", "/dev:/dev-host", ALPINE, "head", "-n0", "/dev-host/kmsg"})
 		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Not(ExitCleanly()))
+		Expect(session).To(ExitWithErrorRegex(1, "head: /dev-host/kmsg: (Operation not permitted|Permission denied)"))
 	})
 
 })

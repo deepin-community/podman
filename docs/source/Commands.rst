@@ -5,6 +5,8 @@ Commands
 
 :doc:`Podman <markdown/podman.1>` (Pod Manager) Global Options, Environment Variables, Exit Codes, Configuration Files, and more
 
+:doc:`artifact <markdown/podman-artifact.1>` Manage OCI artifacts
+
 :doc:`attach <markdown/podman-attach.1>` Attach to a running container
 
 :doc:`auto-update <markdown/podman-auto-update.1>` Auto update containers according to their auto-update policy
@@ -78,6 +80,8 @@ Commands
 :doc:`pull <markdown/podman-pull.1>` Pull an image from a registry
 
 :doc:`push <markdown/podman-push.1>` Push an image to a specified destination
+
+:doc:`quadlet <markdown/podman-quadlet.1>` Allows users to manage Quadlets
 
 :doc:`rename <markdown/podman-rename.1>` Rename an existing container
 

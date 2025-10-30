@@ -25,7 +25,6 @@ const (
 	kubeFilePermission = 0644
 )
 
-//nolint:revive
 type KubeVolumeType int
 
 const (
@@ -37,13 +36,13 @@ const (
 	KubeVolumeTypeSecret
 	KubeVolumeTypeEmptyDir
 	KubeVolumeTypeEmptyDirTmpfs
+	KubeVolumeTypeImage
 )
 
-//nolint:revive
 type KubeVolume struct {
 	// Type of volume to create
 	Type KubeVolumeType
-	// Path for bind mount or volume name for named volume
+	// Path for bind mount, volume name for named volume or image name for image volume
 	Source string
 	// Items to add to a named volume created where the key is the file name and the value is the data
 	// This is only used when there are volumes in the yaml that refer to a configmap
@@ -56,6 +55,8 @@ type KubeVolume struct {
 	// DefaultMode sets the permissions on files created for the volume
 	// This is optional and defaults to 0644
 	DefaultMode int32
+	// Used for volumes of type Image. Ignored for other volumes types.
+	ImagePullPolicy v1.PullPolicy
 }
 
 // Create a KubeVolume from an HostPathVolumeSource
@@ -166,9 +167,8 @@ func VolumeFromSecret(secretSource *v1.SecretVolumeSource, secretsManager *secre
 
 	secret := &v1.Secret{}
 
-	err = yaml.Unmarshal(secretByte, secret)
-	if err != nil {
-		return nil, err
+	if err := yaml.Unmarshal(secretByte, secret); err != nil {
+		return nil, fmt.Errorf("only secrets created via the kube yaml file are supported: %w", err)
 	}
 
 	// If there are Items specified in the volumeSource, that overwrites the Data from the Secret
@@ -279,6 +279,14 @@ func VolumeFromEmptyDir(emptyDirVolumeSource *v1.EmptyDirVolumeSource, name stri
 	}
 }
 
+func VolumeFromImage(imageVolumeSource *v1.ImageVolumeSource, name string) (*KubeVolume, error) {
+	return &KubeVolume{
+		Type:            KubeVolumeTypeImage,
+		Source:          imageVolumeSource.Reference,
+		ImagePullPolicy: imageVolumeSource.PullPolicy,
+	}, nil
+}
+
 // Create a KubeVolume from one of the supported VolumeSource
 func VolumeFromSource(volumeSource v1.VolumeSource, configMaps []v1.ConfigMap, secretsManager *secrets.SecretsManager, volName, mountLabel string) (*KubeVolume, error) {
 	switch {
@@ -292,6 +300,8 @@ func VolumeFromSource(volumeSource v1.VolumeSource, configMaps []v1.ConfigMap, s
 		return VolumeFromSecret(volumeSource.Secret, secretsManager)
 	case volumeSource.EmptyDir != nil:
 		return VolumeFromEmptyDir(volumeSource.EmptyDir, volName)
+	case volumeSource.Image != nil:
+		return VolumeFromImage(volumeSource.Image, volName)
 	default:
 		return nil, errors.New("HostPath, ConfigMap, EmptyDir, Secret, and PersistentVolumeClaim are currently the only supported VolumeSource")
 	}

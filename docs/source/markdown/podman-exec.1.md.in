@@ -4,14 +4,18 @@
 podman\-exec - Execute a command in a running container
 
 ## SYNOPSIS
-**podman exec** [*options*] *container* [*command* [*arg* ...]]
+**podman exec** [*options*] *container* *command* [*arg* ...]
 
-**podman container exec** [*options*] *container* [*command* [*arg* ...]]
+**podman container exec** [*options*] *container* *command* [*arg* ...]
 
 ## DESCRIPTION
 **podman exec** executes a command in a running container.
 
 ## OPTIONS
+
+#### **--cidfile**=*file*
+
+Read the ID of the target container from the specified *file*.
 
 #### **--detach**, **-d**
 
@@ -82,6 +86,11 @@ $ podman exec -it -w /tmp myCtr pwd
 Execute command as the specified user in selected container:
 ```
 $ podman exec --user root ctrID ls
+```
+
+Execute command but do not attach to the exec session leaving the command running in the background:
+```
+$ podman exec -d ctrID find /path/to/search -name yourfile
 ```
 
 ## SEE ALSO

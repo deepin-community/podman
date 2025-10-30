@@ -393,7 +393,7 @@ func (u *updater) assembleTasks(ctx context.Context) []error {
 		}
 		policy, err := LookupPolicy(value)
 		if err != nil {
-			errs = append(errs, err)
+			errs = append(errs, fmt.Errorf("auto-updating container %q: %w", ctr.ID(), err))
 			continue
 		}
 		if policy == PolicyDefault {
@@ -480,7 +480,7 @@ func (u *updater) assembleImageMap(ctx context.Context) (map[string]*libimage.Im
 	listOptions := &libimage.ListImagesOptions{
 		Filters: []string{"readonly=false"},
 	}
-	imagesSlice, err := u.runtime.LibimageRuntime().ListImages(ctx, nil, listOptions)
+	imagesSlice, err := u.runtime.LibimageRuntime().ListImages(ctx, listOptions)
 	if err != nil {
 		return nil, err
 	}

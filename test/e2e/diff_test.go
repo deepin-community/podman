@@ -104,7 +104,7 @@ RUN echo test
 		session = podmanTest.Podman([]string{"image", "diff", image, baseImage})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
-		Expect(session.OutputToStringArray()).To(HaveLen(4))
+		Expect(session.OutputToStringArray()).To(HaveLen(3))
 		Expect(session.OutputToString()).To(ContainSubstring("A " + file1))
 		Expect(session.OutputToString()).To(ContainSubstring("A " + file2))
 		Expect(session.OutputToString()).To(ContainSubstring("A " + file3))
@@ -136,8 +136,8 @@ RUN echo test
 
 		// Create container image with the files
 		containerfile := fmt.Sprintf(`
-FROM  %s
-RUN touch %s`, ALPINE, imagefile)
+	 FROM  %s
+	 RUN touch %s`, ALPINE, imagefile)
 
 		name := "podman-diff-test"
 		podmanTest.BuildImage(containerfile, name, "false")
@@ -150,13 +150,13 @@ RUN touch %s`, ALPINE, imagefile)
 		session = podmanTest.Podman([]string{"diff", name})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
-		Expect(session.OutputToStringArray()).To(HaveLen(2))
+		Expect(session.OutputToStringArray()).To(HaveLen(1))
 		Expect(session.OutputToString()).To(ContainSubstring(imagefile))
 
 		session = podmanTest.Podman([]string{"image", "diff", name})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
-		Expect(session.OutputToStringArray()).To(HaveLen(2))
+		Expect(session.OutputToStringArray()).To(HaveLen(1))
 		Expect(session.OutputToString()).To(ContainSubstring(imagefile))
 
 		// container diff has to show the container

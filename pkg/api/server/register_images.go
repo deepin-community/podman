@@ -227,7 +227,7 @@ func (s *APIServer) registerImagesHandlers(r *mux.Router) error {
 	//  - in: query
 	//    name: force
 	//    type: boolean
-	//    description: remove the image even if used by containers or has other tags
+	//    description: Remove the image even if it is being used by stopped containers or has other tags
 	//  - in: query
 	//    name: noprune
 	//    type: boolean
@@ -523,6 +523,12 @@ func (s *APIServer) registerImagesHandlers(r *mux.Router) error {
 	//      TBD Extra hosts to add to /etc/hosts
 	//      (As of version 1.xx)
 	//  - in: query
+	//    name: nohosts
+	//    type: boolean
+	//    default:
+	//    description: |
+	//      Not to create /etc/hosts when building the image
+	//  - in: query
 	//    name: remote
 	//    type: string
 	//    default:
@@ -536,18 +542,23 @@ func (s *APIServer) registerImagesHandlers(r *mux.Router) error {
 	//      with the corresponding path inside the tarball.
 	//      (As of version 1.xx)
 	//  - in: query
+	//    name: retry
+	//    type: integer
+	//    default: 3
+	//    description: |
+	//      Number of times to retry in case of failure when performing push/pull.
+	//  - in: query
+	//    name: retry-delay
+	//    type: string
+	//    default: 2s
+	//    description: |
+	//      Delay between retries in case of push/pull failures.
+	//  - in: query
 	//    name: q
 	//    type: boolean
 	//    default: false
 	//    description: |
 	//      Suppress verbose build output
-	//  - in: query
-	//    name: compatvolumes
-	//    type: boolean
-	//    default: false
-	//    description: |
-	//      Contents of base images to be modified on ADD or COPY only
-	//      (As of Podman version v5.2)
 	//  - in: query
 	//    name: nocache
 	//    type: boolean
@@ -1129,6 +1140,12 @@ func (s *APIServer) registerImagesHandlers(r *mux.Router) error {
 	//    description: |
 	//      Remove images even when they are used by external containers (e.g, by build containers)
 	//  - in: query
+	//    name: buildcache
+	//    default: false
+	//    type: boolean
+	//    description: |
+	//      Remove persistent build cache created by build instructions such as `--mount=type=cache`.
+	//  - in: query
 	//    name: filters
 	//    type: string
 	//    description: |
@@ -1456,6 +1473,14 @@ func (s *APIServer) registerImagesHandlers(r *mux.Router) error {
 	// summary: Create image
 	// description: Build an image from the given Dockerfile(s)
 	// parameters:
+	//  - in: header
+	//    name: Content-Type
+	//    type: string
+	//    default: application/x-tar
+	//    enum: ["application/x-tar", "multipart/form-data"]
+	//  - in: header
+	//    name: X-Registry-Config
+	//    type: string
 	//  - in: query
 	//    name: dockerfile
 	//    type: string
@@ -1477,12 +1502,40 @@ func (s *APIServer) registerImagesHandlers(r *mux.Router) error {
 	//      and build for all of the platforms that are available.  Stages that use *scratch* as a starting point can not be inspected,
 	//      so at least one non-*scratch* stage must be present for detection to work usefully.
 	//  - in: query
+	//    name: additionalbuildcontexts
+	//    type: array
+	//    items:
+	//      type: string
+	//    default: []
+	//    description: |
+	//      Additional build contexts for builds that require more than one context.
+	//      Each additional context must be specified as a key-value pair in the format "name=value".
+	//
+	//      The value can be specified in two formats:
+	//      - URL context: Use the prefix "url:" followed by a URL to a tar archive
+	//        Example: "mycontext=url:https://example.com/context.tar"
+	//      - Image context: Use the prefix "image:" followed by an image reference
+	//        Example: "mycontext=image:alpine:latest" or "mycontext=image:docker.io/library/ubuntu:22.04"
+	//
+	//      Local contexts are provided via multipart/form-data upload. When using multipart/form-data,
+	//      include additional build contexts as separate form fields with names prefixed by "build-context-".
+	//      For example, a local context named "mycontext" should be uploaded as a tar file in a field
+	//      named "build-context-mycontext".
+	//
+	//      (As of version 5.6.0)
+	//  - in: query
 	//    name: extrahosts
 	//    type: string
 	//    default:
 	//    description: |
 	//      TBD Extra hosts to add to /etc/hosts
 	//      (As of version 1.xx)
+	//  - in: query
+	//    name: nohosts
+	//    type: boolean
+	//    default:
+	//    description: |
+	//      Not to create /etc/hosts when building the image
 	//  - in: query
 	//    name: remote
 	//    type: string
@@ -1507,8 +1560,51 @@ func (s *APIServer) registerImagesHandlers(r *mux.Router) error {
 	//    type: boolean
 	//    default: false
 	//    description: |
-	//      Contents of base images to be modified on ADD or COPY only
+	//      Contents of volume locations to be modified on ADD or COPY only
 	//      (As of Podman version v5.2)
+	//  - in: query
+	//    name: createdannotation
+	//    type: boolean
+	//    default: true
+	//    description: |
+	//      Add an "org.opencontainers.image.created" annotation to the
+	//      image.
+	//      (As of Podman version v5.6)
+	//  - in: query
+	//    name: sourcedateepoch
+	//    type: number
+	//    description: |
+	//      Timestamp to use for newly-added history entries and the image's
+	//      creation date.
+	//      (As of Podman version v5.6)
+	//  - in: query
+	//    name: rewritetimestamp
+	//    type: boolean
+	//    default: false
+	//    description: |
+	//      If sourcedateepoch is set, force new content added in layers to
+	//      have timestamps no later than the sourcedateepoch date.
+	//      (As of Podman version v5.6)
+	//  - in: query
+	//    name: timestamp
+	//    type: number
+	//    description: |
+	//      Timestamp to use for newly-added history entries, the image's
+	//      creation date, and for new content added in layers.
+	//  - in: query
+	//    name: inheritlabels
+	//    type: boolean
+	//    default: true
+	//    description: |
+	//      Inherit the labels from the base image or base stages
+	//      (As of Podman version v5.5)
+	//  - in: query
+	//    name: inheritannotations
+	//    type: boolean
+	//    default: true
+	//    description: |
+	//      Inherit the annotations from the base image or base stages
+	//      (As of Podman version v5.6)
 	//  - in: query
 	//    name: nocache
 	//    type: boolean
@@ -1681,6 +1777,14 @@ func (s *APIServer) registerImagesHandlers(r *mux.Router) error {
 	//  - in: query
 	//    name: unsetlabel
 	//    description: Unset the image label, causing the label not to be inherited from the base image.
+	//    type: array
+	//    items:
+	//      type: string
+	//  - in: query
+	//    name: unsetannotation
+	//    description: |
+	//      Unset the image annotation, causing the annotation not to be inherited from the base image.
+	//      (As of Podman version v5.6)
 	//    type: array
 	//    items:
 	//      type: string

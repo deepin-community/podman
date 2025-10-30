@@ -19,17 +19,19 @@ import (
 	"github.com/containers/podman/v5/libpod"
 	"github.com/containers/podman/v5/pkg/api/handlers"
 	"github.com/containers/podman/v5/pkg/api/handlers/utils"
+	"github.com/containers/podman/v5/pkg/api/handlers/utils/apiutil"
 	api "github.com/containers/podman/v5/pkg/api/types"
 	"github.com/containers/podman/v5/pkg/auth"
 	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/containers/podman/v5/pkg/domain/infra/abi"
 	"github.com/containers/podman/v5/pkg/util"
 	"github.com/containers/storage"
-	docker "github.com/docker/docker/api/types"
 	dockerContainer "github.com/docker/docker/api/types/container"
 	dockerImage "github.com/docker/docker/api/types/image"
-	"github.com/docker/go-connections/nat"
+	dockerStorage "github.com/docker/docker/api/types/storage"
+	dockerSpec "github.com/moby/docker-image-spec/specs-go/v1"
 	"github.com/opencontainers/go-digest"
+	imageSpec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sirupsen/logrus"
 )
 
@@ -243,7 +245,7 @@ func CreateImageFromSrc(w http.ResponseWriter, r *http.Request) {
 		Status         string            `json:"status"`
 		Progress       string            `json:"progress"`
 		ProgressDetail map[string]string `json:"progressDetail"`
-		Id             string            `json:"id"` //nolint:revive,stylecheck
+		Id             string            `json:"id"`
 	}{
 		Status:         report.Id,
 		ProgressDetail: map[string]string{},
@@ -339,7 +341,7 @@ func GetImage(w http.ResponseWriter, r *http.Request) {
 		utils.Error(w, http.StatusNotFound, fmt.Errorf("failed to find image %s: %s", name, errMsg))
 		return
 	}
-	inspect, err := imageDataToImageInspect(r.Context(), newImage)
+	inspect, err := imageDataToImageInspect(r.Context(), newImage, r)
 	if err != nil {
 		utils.Error(w, http.StatusInternalServerError, fmt.Errorf("failed to convert ImageData to ImageInspect '%s': %w", name, err))
 		return
@@ -347,31 +349,29 @@ func GetImage(w http.ResponseWriter, r *http.Request) {
 	utils.WriteResponse(w, http.StatusOK, inspect)
 }
 
-func imageDataToImageInspect(ctx context.Context, l *libimage.Image) (*handlers.ImageInspect, error) {
+func imageDataToImageInspect(ctx context.Context, l *libimage.Image, r *http.Request) (*handlers.ImageInspect, error) {
 	options := &libimage.InspectOptions{WithParent: true, WithSize: true}
 	info, err := l.Inspect(ctx, options)
 	if err != nil {
 		return nil, err
 	}
-	ports, err := portsToPortSet(info.Config.ExposedPorts)
-	if err != nil {
-		return nil, err
-	}
 
 	// TODO: many fields in Config still need wiring
-	config := dockerContainer.Config{
-		User:         info.User,
-		ExposedPorts: ports,
-		Env:          info.Config.Env,
-		Cmd:          info.Config.Cmd,
-		Volumes:      info.Config.Volumes,
-		WorkingDir:   info.Config.WorkingDir,
-		Entrypoint:   info.Config.Entrypoint,
-		Labels:       info.Labels,
-		StopSignal:   info.Config.StopSignal,
+	config := dockerSpec.DockerOCIImageConfig{
+		ImageConfig: imageSpec.ImageConfig{
+			User:         info.User,
+			ExposedPorts: info.Config.ExposedPorts,
+			Env:          info.Config.Env,
+			Cmd:          info.Config.Cmd,
+			Volumes:      info.Config.Volumes,
+			WorkingDir:   info.Config.WorkingDir,
+			Entrypoint:   info.Config.Entrypoint,
+			Labels:       info.Labels,
+			StopSignal:   info.Config.StopSignal,
+		},
 	}
 
-	rootfs := docker.RootFS{}
+	rootfs := dockerImage.RootFS{}
 	if info.RootFS != nil {
 		rootfs.Type = info.RootFS.Type
 		rootfs.Layers = make([]string, 0, len(info.RootFS.Layers))
@@ -380,7 +380,7 @@ func imageDataToImageInspect(ctx context.Context, l *libimage.Image) (*handlers.
 		}
 	}
 
-	graphDriver := docker.GraphDriverData{
+	graphDriver := dockerStorage.DriverData{
 		Name: info.GraphDriver.Name,
 		Data: info.GraphDriver.Data,
 	}
@@ -389,7 +389,7 @@ func imageDataToImageInspect(ctx context.Context, l *libimage.Image) (*handlers.
 	cc.Hostname = info.ID[0:11] // short ID is the hostname
 	cc.Volumes = info.Config.Volumes
 
-	dockerImageInspect := docker.ImageInspect{
+	dockerImageInspect := dockerImage.InspectResponse{
 		Architecture:    info.Architecture,
 		Author:          info.Author,
 		Comment:         info.Comment,
@@ -408,45 +408,24 @@ func imageDataToImageInspect(ctx context.Context, l *libimage.Image) (*handlers.
 		RootFS:          rootfs,
 		Size:            info.Size,
 		Variant:         "",
-		VirtualSize:     info.VirtualSize,
 	}
-	return &handlers.ImageInspect{ImageInspect: dockerImageInspect}, nil
-}
 
-// portsToPortSet converts libpod's exposed ports to docker's structs
-func portsToPortSet(input map[string]struct{}) (nat.PortSet, error) {
-	ports := make(nat.PortSet)
-	for k := range input {
-		proto, port := nat.SplitProtoPort(k)
-		switch proto {
-		// See the OCI image spec for details:
-		// https://github.com/opencontainers/image-spec/blob/e562b04403929d582d449ae5386ff79dd7961a11/config.md#properties
-		case "tcp", "":
-			p, err := nat.NewPort("tcp", port)
-			if err != nil {
-				return nil, fmt.Errorf("unable to create tcp port from %s: %w", k, err)
-			}
-			ports[p] = struct{}{}
-		case "udp":
-			p, err := nat.NewPort("udp", port)
-			if err != nil {
-				return nil, fmt.Errorf("unable to create tcp port from %s: %w", k, err)
-			}
-			ports[p] = struct{}{}
-		default:
-			return nil, fmt.Errorf("invalid port proto %q in %q", proto, k)
-		}
+	if _, err := apiutil.SupportedVersion(r, "<1.44.0"); err == nil {
+		//nolint:staticcheck // Deprecated field
+		dockerImageInspect.VirtualSize = info.VirtualSize
 	}
-	return ports, nil
+
+	return &handlers.ImageInspect{InspectResponse: dockerImageInspect}, nil
 }
 
 func GetImages(w http.ResponseWriter, r *http.Request) {
 	decoder := utils.GetDecoder(r)
 	runtime := r.Context().Value(api.RuntimeKey).(*libpod.Runtime)
 	query := struct {
-		All     bool
-		Digests bool
-		Filter  string // Docker 1.24 compatibility
+		All        bool
+		Digests    bool
+		Filter     string // Docker 1.24 compatibility
+		SharedSize bool   `schema:"shared-size"` // Docker 1.42 compatibility
 	}{
 		// This is where you can override the golang default value for one of fields
 	}
@@ -496,6 +475,26 @@ func GetImages(w http.ResponseWriter, r *http.Request) {
 		// docker adds sha256: in front of the ID
 		for _, s := range summaries {
 			s.ID = "sha256:" + s.ID
+			// Ensure RepoTags and RepoDigests are empty arrays instead of null for Docker compatibility
+			// as per https://docs.docker.com/reference/api/engine/version-history/#v143-api-changes
+			// Relates to https://issues.redhat.com/browse/RUN-2699
+			if s.RepoTags == nil {
+				s.RepoTags = []string{}
+			}
+			if s.RepoDigests == nil {
+				s.RepoDigests = []string{}
+			}
+			// Docker 1.42 sets SharedSize to -1 if ont passed explicitly
+			if !query.SharedSize {
+				s.SharedSize = -1
+			}
+			// VirtualSize is deprecated in version 1.43 and removed in version 1.44
+			// See https://docs.docker.com/reference/api/engine/version-history/#v143-api-changes
+			if _, err := apiutil.SupportedVersion(r, "<1.44.0"); err == nil {
+				s.VirtualSize = s.Size
+			} else {
+				s.VirtualSize = 0
+			}
 		}
 	}
 	utils.WriteResponse(w, http.StatusOK, summaries)

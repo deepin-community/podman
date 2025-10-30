@@ -1,6 +1,5 @@
 # -*- bash -*-
 
-_cached_has_pasta=
 _cached_has_slirp4netns=
 
 ### Feature Checks #############################################################
@@ -44,28 +43,6 @@ function has_slirp4netns() {
     fi
     test "$_cached_has_slirp4netns" = "y"
 }
-
-# has_pasta() - Check if the pasta(1) command is available
-function has_pasta() {
-    if [[ -z "$_cached_has_pasta" ]]; then
-        _cached_has_pasta=n
-        run_podman info --format '{{.Host.Pasta.Executable}}'
-        if [[ -n "$output" ]]; then
-            _cached_has_pasta=y
-        fi
-    fi
-    test "$_cached_has_pasta" = "y"
-}
-
-# skip_if_no_pasta() - Skip current test if pasta(1) is not available
-# $1:	Optional message to display
-function skip_if_no_pasta() {
-    if ! has_pasta; then
-        local msg=$(_add_label_if_missing "$1" "pasta")
-        skip "${msg:-not applicable with no pasta binary}"
-    fi
-}
-
 
 ### procfs access ##############################################################
 
@@ -273,6 +250,36 @@ function ether_get_name() {
 
 ### Ports and Ranges ###########################################################
 
+# reserve_port() - create a lock file reserving a port, or return false
+function reserve_port() {
+    local port=$1
+
+    mkdir -p $PORT_LOCK_DIR
+    local lockfile=$PORT_LOCK_DIR/$port
+    local locktmp=$PORT_LOCK_DIR/.$port.$$
+    echo $BATS_SUITE_TEST_NUMBER >$locktmp
+
+    if ln $locktmp $lockfile; then
+        rm -f $locktmp
+        return
+    fi
+    # Port already reserved
+    rm -f $locktmp
+    false
+}
+
+# unreserve_port() - free a temporarily-reserved port
+function unreserve_port() {
+    local port=$1
+
+    local lockfile=$PORT_LOCK_DIR/$port
+    -e $lockfile || die "Cannot unreserve non-reserved port $port"
+    assert "$(< $lockfile)" = "$BATS_SUITE_TEST_NUMBER" \
+           "Port $port is not reserved by this test"
+    rm -f $lockfile
+}
+
+
 # random_free_port() - Get unbound port with pseudorandom number
 # $1:	Optional, dash-separated interval, [5000, 5999] by default
 # $2:	Optional binding address, any IPv4 address by default
@@ -284,9 +291,14 @@ function random_free_port() {
 
     local port
     for port in $(shuf -i ${range}); do
-        if port_is_free $port $address $protocol; then
-            echo $port
-            return
+        # First make sure no other tests are using it
+        if reserve_port $port; then
+            if port_is_free $port $address $protocol; then
+                echo $port
+                return
+            fi
+
+            unreserve_port $port
         fi
     done
 
@@ -308,8 +320,13 @@ function random_free_port_range() {
         local lastport=
         for i in $(seq 1 $((size - 1))); do
             lastport=$((firstport + i))
+            if ! reserve_port $lastport; then
+                lastport=
+                break
+            fi
             if ! port_is_free $lastport $address $protocol; then
                 echo "# port $lastport is in use; trying another." >&3
+                unreserve_port $lastport
                 lastport=
                 break
             fi
@@ -318,6 +335,8 @@ function random_free_port_range() {
             echo "$firstport-$lastport"
             return
         fi
+
+        unreserve_port $firstport
 
         maxtries=$((maxtries - 1))
     done
@@ -404,7 +423,7 @@ function wait_for_port() {
 function tcp_port_probe() {
     local address="${2:-0.0.0.0}"
 
-    : | nc "${address}" "${1}"
+    (exec echo -n >/dev/tcp/"$address/$1") >/dev/null 2>&1
 }
 
 ### Pasta Helpers ##############################################################

@@ -24,9 +24,9 @@ but can be optionally used on Linux.
 SSH keys are automatically generated to access the VM, and system connections to the root account
 and a user account inside the VM are added.
 
-By default, the VM distribution is [Fedora CoreOS](https://getfedora.org/en/coreos?stream=testing) except for
-WSL which is based on a custom Fedora image.  While Fedora CoreOS upgrades come out every 14 days, the automatic
-update mechanism Zincata is disabled by Podman machine.
+By default, the VM distribution is a custom [Fedora CoreOS](https://getfedora.org/en/coreos?stream=stable)
+based image pushed to quay.io/podman/machine-os (build in https://github.com/containers/podman-machine-os).
+WSL is an exception and is based on a custom Fedora image.
 
 To check if there is an upgrade available for your machine os, you can run the following command:
 
@@ -38,19 +38,20 @@ If an update is available, you can rerun the above command and remove the `--che
 be updated.  After updating, you must stop and start your machine with `podman machine stop && podman machine start` for
 it to take effect.
 
+The above mechanism is only used to update patch (Z) versions of podman. For updates to new major and minor
+version (X.Y) use the **[podman machine os apply](podman-machine-os-apply.1.md)** command, see the docs there for
+more information.
+
 Note: Updating as described above can result in version mismatches between Podman on the host and Podman in the
 machine.  Executing `podman info` should reveal versions of both.  A configuration where the Podman host and machine
 mismatch are unsupported.
 
-For more information on updates and advanced configuration,
-see the Fedora CoreOS documentation about [auto-updates](https://docs.fedoraproject.org/en-US/fedora-coreos/auto-updates/) and [update strategies](https://coreos.github.io/zincati/usage/updates-strategy/).
+To update the WSL image you must run dnf update inside, use the following command:
+```
+$ podman machine ssh dnf update
+```
 
-
-
-
-Fedora CoreOS upgrades come out every 14 days and are detected and installed automatically. The VM is rebooted during the upgrade.
-For more information on updates and advanced configuration,
-see the Fedora CoreOS documentation about [auto-updates](https://docs.fedoraproject.org/en-US/fedora-coreos/auto-updates/) and [update strategies](https://coreos.github.io/zincati/usage/updates-strategy/).
+Default Podman machine settings can be set via the [machine] section in the containers.conf(5) file.
 
 ## OPTIONS
 
@@ -78,6 +79,8 @@ is copied into the user's CONF_DIR and renamed.  Additionally, no SSH keys are g
 Fully qualified registry, path, or URL to a VM image.
 Registry target must be in the form of `docker://registry/repo/image:version`.
 
+Note: Only images provided by podman will be supported.
+
 #### **--memory**, **-m**=*number*
 
 Memory (in MiB). Note: 1024MiB = 1GiB.
@@ -86,6 +89,13 @@ Memory (in MiB). Note: 1024MiB = 1GiB.
 
 Start the virtual machine immediately after it has been initialized.
 
+#### **--playbook**
+
+Add the provided Ansible playbook to the machine and execute it after the first boot.
+
+Note: The playbook will be executed with the same privileges given to the user in the virtual machine. The playbook provided cannot include other files from the host system, as they will not be copied.
+Use of the `--playbook` flag will require the image to include Ansible. The default image provided will have Ansible included.
+
 #### **--rootful**
 
 Whether this machine prefers rootful (`true`) or rootless (`false`)
@@ -93,6 +103,12 @@ container execution. This option determines the remote connection default
 if there is no existing remote connection configurations.
 
 API forwarding, if available, follows this setting.
+
+#### **--swap**, **-s**=*number*
+
+Swap (in MiB). Note: 1024MiB = 1GiB.
+
+Renders a `zram-generator.conf` file with zram-size set to the value passed to --swap
 
 #### **--timezone**
 
@@ -138,6 +154,12 @@ options are:
 * **rw**: mount volume read/write (default)
 * **security_model=[model]**: specify 9p security model (see below)
 
+Note: The following destinations are forbidden for volumes: `/bin`, `/boot`, `/dev`, `/etc`,
+`/home`, `/proc`, `/root`, `/run`, `/sbin`, `/sys`, `/tmp`, `/usr`, and `/var`. Subdirectories
+of these destinations are allowed but users should be careful to not mount to important directories
+as unexpected results may occur.
+
+
 The 9p security model [determines] https://wiki.qemu.org/Documentation/9psetup#Starting_the_Guest_directly
 if and how the 9p filesystem translates some filesystem operations before
 actual storage on the host.
@@ -160,6 +182,11 @@ Example: `-v "$HOME/git:$HOME/git:ro,security_model=none"`
 Default volume mounts are defined in *containers.conf*.  Unless changed, the default values
 is `$HOME:$HOME`.
 
+**Note on Windows Subsystem for Linux (WSL)**
+Since all drives are mounted at `/mnt` on startup by default in WSL, passing
+`--volume` is redundant and has no effect. The host home directory for a `C:`
+drive will be mounted at `/mnt/c/Users/<my username>`.
+
 ## EXAMPLES
 
 Initialize the default Podman machine, pulling the content from the internet.
@@ -170,6 +197,12 @@ $ podman machine init
 Initialize a Podman machine for the specified name pulling the content from the internet.
 ```
 $ podman machine init myvm
+```
+
+Initialize and start a new Podman machine in one step.
+
+```
+podman machine init --now
 ```
 
 Initialize the default Podman machine pulling the content from the internet defaulting to rootful mode. The default is rootless.
@@ -187,9 +220,9 @@ Initialize the specified Podman machine overriding its memory size, pulling the 
 $ podman machine init --memory=1024 myvm
 ```
 
-Initialize the default Podman machine with the host directory `/Users` mounted into the VM at `/mnt/Users`.
+Initialize the default Podman machine with the host directory `/Users` mounted into the VM at `/Users`.
 ```
-$ podman machine init -v /Users:/mnt/Users
+$ podman machine init -v /Users:/Users
 ```
 
 Initialize the default Podman machine with a usb device passthrough specified with options. Only supported for QEMU Machines.
@@ -203,7 +236,7 @@ $ podman machine init --usb bus=1,devnum=3
 ```
 
 ## SEE ALSO
-**[podman(1)](podman.1.md)**, **[podman-machine(1)](podman-machine.1.md)**
+**[podman(1)](podman.1.md)**, **[podman-machine(1)](podman-machine.1.md)**, **containers.conf(5)**
 
 ## HISTORY
 March 2021, Originally compiled by Ashley Cui <acui@redhat.com>

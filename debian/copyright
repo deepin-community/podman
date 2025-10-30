@@ -1,17 +1,16 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
-Upstream-Name: podman
 Source: https://github.com/containers/podman
+Upstream-Name: podman
 Files-Excluded:
+ .github
  vendor
  test/tools/vendor
+ contrib/win-installer
+ contrib/cirrus
 
 Files: *
 Copyright: 2016-2023, Red Hat, Inc.
 License: Apache-2.0
-
-Files: contrib/snapcraft/*
-Copyright: 2017, Snapcrafters
-License: Expat
 
 Files: debian/*
 Copyright: 2023, Faidon Liambotis <paravoid@debian.org>
@@ -24,43 +23,43 @@ Copyright: 2009, The Go Authors.
 License: BSD-3-clause
 
 Files: hack/fork_exec_snoop.bt
-Copyright: 2023, Paul Wallrabe <pwallrab@redhat.com>
- 2022, Nicolas Hillegeer <nicolas@hillegeer.com>
+Copyright: 2022, Nicolas Hillegeer <nicolas@hillegeer.com>
+ 2023, Paul Wallrabe <pwallrab@redhat.com>
 License: Apache-2.0
 
-Files: libpod/networking_pasta_linux.go
-Copyright: 2022, Red Hat GmbH
+Files: libpod/*
+Copyright: 2022, Red Hat
 License: Apache-2.0
 
 Files: pkg/*
 Copyright: 2013-2018, Docker, Inc.
 License: Apache-2.0
 
+Files: pkg/annotations/*
+Copyright: 2014-2017, The Kubernetes Authors.
+License: Apache-2.0
+
+Files: pkg/domain/infra/abi/internal/expansion/*
+Copyright: 2009, The Go Authors.
+License: BSD-3-clause
+
 Files: pkg/k8s.io/*
-Copyright: belongs to the Kubernetes Authors and is licensed under Apache-2.0, also check the license headers in the files.
+Copyright: 2014-2017, The Kubernetes Authors.
 License: Apache-2.0
 
 Files: pkg/k8s.io/api/apps/*
-Copyright: 2014-2017, 2020, The Kubernetes Authors.
+Copyright: 2014-2017, The Kubernetes Authors.
 License: Apache-2.0
 
 Files: pkg/k8s.io/api/core/*
-Copyright: 2014-2017, 2020, The Kubernetes Authors.
+Copyright: 2014-2017, The Kubernetes Authors.
 License: Apache-2.0
 
 Files: pkg/k8s.io/apimachinery/pkg/*
-Copyright: 2014-2017, 2020, The Kubernetes Authors.
+Copyright: 2014-2017, The Kubernetes Authors.
 License: Apache-2.0
 
-Files: pkg/systemd/parser/unitfile_test.go
-Copyright: no-info-found
-License: LGPL-2.1+
-
-Files: pkg/util/camelcase/*
-Copyright: 2015, Fatih Arslan
-License: Expat
-
-Files: test/system/505-networking-pasta.bats
+Files: test/*
 Copyright: 2022, Red Hat GmbH
 License: Apache-2.0
 
@@ -109,29 +108,3 @@ License: BSD-3-clause
  LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
  NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-License: Expat
- Permission is hereby granted, free of charge, to any person obtaining a copy of
- this software and associated documentation files (the "Software"), to deal in
- the Software without restriction, including without limitation the rights to
- use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- the Software, and to permit persons to whom the Software is furnished to do so,
- subject to the following conditions:
- .
-  The above copyright notice and this permission notice shall be included in all
-  copies or substantial portions of the Software.
- .
- THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-License: LGPL-2.1+
- This program is free software; you can redistribute it and/or modify it
- under the terms of the GNU Lesser General Public License as published by the
- Free Software Foundation; version 2.1 of the License, or (at
- your option) any later version.
- On Debian systems, the complete text of version 2.1 of the GNU Lesser
- General Public License can be found in '/usr/share/common-licenses/LGPL-2.1'.

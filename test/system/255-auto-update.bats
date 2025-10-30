@@ -267,7 +267,7 @@ function _confirm_update() {
 
     _wait_service_ready container-$cname.service
     run_podman 125 auto-update
-    is "$output" ".*invalid auto-update policy.*" "invalid policy setup"
+    assert "$output" =~ 'auto-updating container "[0-9a-f]{64}": invalid auto-update policy "'"$fakevalue"'": valid policies are \["disabled" "image" "local" "registry"\]' "invalid policy setup"
 
     run_podman inspect --format "{{.Image}}" $cname
     is "$output" "$ori_image" "Image ID should not change"
@@ -384,8 +384,7 @@ EOF
     # Exit code is expected, due to invalid 'fakevalue'
     run_podman 125 auto-update --rollback=false
     update_log=$output
-    is "$update_log" ".*invalid auto-update policy.*" "invalid policy setup"
-    is "$update_log" ".*Error: invalid auto-update policy.*" "invalid policy setup"
+    assert "$update_log" =~ '.*Error: auto-updating container "[0-9a-f]{64}": invalid auto-update policy.*' "invalid policy setup"
 
     local n_updated=$(grep -c 'Trying to pull' <<<"$update_log")
     is "$n_updated" "2" "Number of images updated from registry."
@@ -563,7 +562,7 @@ EOF
 
     # Clean up
     systemctl stop $service_name
-    run_podman rmi -f $(pause_image) $local_image $newID $oldID
+    run_podman rmi -f $local_image $newID $oldID
     run_podman network rm podman-default-kube-network
     rm -f $UNIT_DIR/$unit_name
 }
@@ -630,7 +629,7 @@ EOF
     assert $status -eq 0 "Error stopping pod systemd unit: $output"
 
     run_podman pod rm -f $podname
-    run_podman rmi $local_image $(pause_image)
+    run_podman rmi $local_image
     rm -f $podunit $ctrunit
     systemctl daemon-reload
 }

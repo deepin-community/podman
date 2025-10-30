@@ -51,6 +51,9 @@ func (r *Runtime) NewContainer(ctx context.Context, rSpec *spec.Spec, spec *spec
 	}
 	if infra {
 		options = append(options, withIsInfra())
+		if len(spec.RawImageName) == 0 {
+			options = append(options, withIsDefaultInfra())
+		}
 	}
 	return r.newContainer(ctx, rSpec, options...)
 }
@@ -246,6 +249,17 @@ func (r *Runtime) newContainer(ctx context.Context, rSpec *spec.Spec, options ..
 }
 
 func (r *Runtime) setupContainer(ctx context.Context, ctr *Container) (_ *Container, retErr error) {
+	if ctr.IsDefaultInfra() || ctr.IsService() {
+		err := ctr.createInitRootfs()
+		if err != nil {
+			return nil, err
+		}
+		_, err = ctr.prepareCatatonitMount()
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	// normalize the networks to names
 	// the db backend only knows about network names so we have to make
 	// sure we do not use ids internally
@@ -422,7 +436,6 @@ func (r *Runtime) setupContainer(ctx context.Context, ctr *Container) (_ *Contai
 	if ctr.restoreFromCheckpoint {
 		// Remove information about bind mount
 		// for new container from imported checkpoint
-
 		// NewFromSpec() is deprecated according to its comment
 		// however the recommended replace just causes a nil map panic
 		g := generate.NewFromSpec(ctr.config.Spec)
@@ -491,6 +504,15 @@ func (r *Runtime) setupContainer(ctx context.Context, ctr *Container) (_ *Contai
 			_, err := r.state.Volume(vol.Name)
 			if err == nil {
 				// The volume exists, we're good
+				// Make sure to drop all volume-opt options as they only apply to
+				// the volume create which we don't do again.
+				var volOpts []string
+				for _, opts := range vol.Options {
+					if !strings.HasPrefix(opts, "volume-opt") {
+						volOpts = append(volOpts, opts)
+					}
+				}
+				vol.Options = volOpts
 				continue
 			} else if !errors.Is(err, define.ErrNoSuchVolume) {
 				return nil, fmt.Errorf("retrieving named volume %s for new container: %w", vol.Name, err)
@@ -517,6 +539,7 @@ func (r *Runtime) setupContainer(ctx context.Context, ctr *Container) (_ *Contai
 		if len(vol.Options) > 0 {
 			isDriverOpts := false
 			driverOpts := make(map[string]string)
+			var volOpts []string
 			for _, opts := range vol.Options {
 				if strings.HasPrefix(opts, "volume-opt") {
 					isDriverOpts = true
@@ -525,8 +548,11 @@ func (r *Runtime) setupContainer(ctx context.Context, ctr *Container) (_ *Contai
 						return nil, err
 					}
 					driverOpts[driverOptKey] = driverOptValue
+				} else {
+					volOpts = append(volOpts, opts)
 				}
 			}
+			vol.Options = volOpts
 			if isDriverOpts {
 				parsedOptions := []VolumeCreateOption{WithVolumeOptions(driverOpts)}
 				volOptions = append(volOptions, parsedOptions...)
@@ -576,7 +602,7 @@ func (r *Runtime) setupContainer(ctx context.Context, ctr *Container) (_ *Contai
 	}
 
 	if ctr.runtime.config.Engine.EventsContainerCreateInspectData {
-		if err := ctr.newContainerEventWithInspectData(events.Create, "", true); err != nil {
+		if err := ctr.newContainerEventWithInspectData(events.Create, define.HealthCheckResults{}, true); err != nil {
 			return nil, err
 		}
 	} else {
@@ -1246,11 +1272,21 @@ func (r *Runtime) GetContainers(loadState bool, filters ...ContainerFilter) ([]*
 		return nil, err
 	}
 
-	ctrsFiltered := make([]*Container, 0, len(ctrs))
+	ctrsFiltered := applyContainersFilters(ctrs, filters...)
 
-	for _, ctr := range ctrs {
+	return ctrsFiltered, nil
+}
+
+// Applies container filters on bunch of containers
+func applyContainersFilters(containers []*Container, filters ...ContainerFilter) []*Container {
+	ctrsFiltered := make([]*Container, 0, len(containers))
+
+	for _, ctr := range containers {
 		include := true
 		for _, filter := range filters {
+			if filter == nil {
+				continue
+			}
 			include = include && filter(ctr)
 		}
 
@@ -1259,7 +1295,7 @@ func (r *Runtime) GetContainers(loadState bool, filters ...ContainerFilter) ([]*
 		}
 	}
 
-	return ctrsFiltered, nil
+	return ctrsFiltered
 }
 
 // GetAllContainers is a helper function for GetContainers
@@ -1412,13 +1448,13 @@ func (r *Runtime) IsStorageContainerMounted(id string) (bool, string, error) {
 
 	mountCnt, err := r.storageService.MountedContainerImage(id)
 	if err != nil {
-		return false, "", err
+		return false, "", fmt.Errorf("get mount count of container: %w", err)
 	}
 	mounted := mountCnt > 0
 	if mounted {
 		path, err = r.storageService.GetMountpoint(id)
 		if err != nil {
-			return false, "", err
+			return false, "", fmt.Errorf("get container mount point: %w", err)
 		}
 	}
 	return mounted, path, nil

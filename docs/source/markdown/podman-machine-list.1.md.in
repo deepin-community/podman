@@ -26,6 +26,10 @@ environment variable while the machines are running can lead to unexpected behav
 
 ## OPTIONS
 
+#### **--all-providers**
+
+Show machines from all providers
+
 #### **--format**=*format*
 
 Change the default output format.  This can be of a supported type like 'json'
@@ -46,6 +50,7 @@ Valid placeholders for the Go template are listed below:
 | .RemoteUsername     | VM Username for rootless Podman           |
 | .Running            | Is machine running                        |
 | .Stream             | Stream name                               |
+| .Swap               | Allocated swap for machine               |
 | .UserModeNetworking | Whether machine uses user-mode networking |
 | .VMType             | VM type                                   |
 

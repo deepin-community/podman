@@ -17,16 +17,13 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// DefaultEventerType is journald when systemd is available
-const DefaultEventerType = Journald
-
 // EventJournalD is the journald implementation of an eventer
 type EventJournalD struct {
 	options EventerOptions
 }
 
-// newEventJournalD creates a new journald Eventer
-func newEventJournalD(options EventerOptions) (Eventer, error) {
+// newJournalDEventer creates a new EventJournalD Eventer
+func newJournalDEventer(options EventerOptions) (Eventer, error) {
 	return EventJournalD{options}, nil
 }
 
@@ -56,23 +53,25 @@ func (e EventJournalD) Write(ee Event) error {
 		if ee.PodID != "" {
 			m["PODMAN_POD_ID"] = ee.PodID
 		}
-		// If we have container labels, we need to convert them to a string so they
-		// can be recorded with the event
-		if len(ee.Details.Attributes) > 0 {
-			b, err := json.Marshal(ee.Details.Attributes)
-			if err != nil {
-				return err
-			}
-			m["PODMAN_LABELS"] = string(b)
+		if err := addLabelsToJournal(m, ee.Details.Attributes); err != nil {
+			return err
 		}
-		m["PODMAN_HEALTH_STATUS"] = ee.HealthStatus
-
+		if ee.Status == HealthStatus {
+			m["PODMAN_HEALTH_STATUS"] = ee.HealthStatus
+			if ee.HealthLog != "" {
+				m["PODMAN_HEALTH_LOG"] = ee.HealthLog
+			}
+			m["PODMAN_HEALTH_FAILING_STREAK"] = strconv.Itoa(ee.HealthFailingStreak)
+		}
 		if len(ee.Details.ContainerInspectData) > 0 {
 			m["PODMAN_CONTAINER_INSPECT_DATA"] = ee.Details.ContainerInspectData
 		}
 	case Network:
 		m["PODMAN_ID"] = ee.ID
 		m["PODMAN_NETWORK_NAME"] = ee.Network
+		if err := addLabelsToJournal(m, ee.Details.Attributes); err != nil {
+			return err
+		}
 	case Volume:
 		m["PODMAN_NAME"] = ee.Name
 	}
@@ -91,9 +90,37 @@ func (e EventJournalD) Write(ee Event) error {
 	return journal.Send(ee.ToHumanReadable(false), prio, m)
 }
 
+func addLabelsToJournal(journalEntry, eventAttributes map[string]string) error {
+	// If we have container labels, we need to convert them to a string so they
+	// can be recorded with the event
+	if len(eventAttributes) > 0 {
+		b, err := json.Marshal(eventAttributes)
+		if err != nil {
+			return err
+		}
+		journalEntry["PODMAN_LABELS"] = string(b)
+	}
+	return nil
+}
+
+func getLabelsFromJournal(entry *sdjournal.JournalEntry, event *Event) error {
+	// we need to check for the presence of labels recorded to a container event
+	if stringLabels, ok := entry.Fields["PODMAN_LABELS"]; ok && len(stringLabels) > 0 {
+		labels := make(map[string]string, 0)
+		if err := json.Unmarshal([]byte(stringLabels), &labels); err != nil {
+			return err
+		}
+
+		// if we have labels, add them to the event
+		if len(labels) > 0 {
+			event.Attributes = labels
+		}
+	}
+	return nil
+}
+
 // Read reads events from the journal and sends qualified events to the event channel
-func (e EventJournalD) Read(ctx context.Context, options ReadOptions) error {
-	defer close(options.EventChannel)
+func (e EventJournalD) Read(ctx context.Context, options ReadOptions) (retErr error) {
 	filterMap, err := generateEventFilters(options.Filters, options.Since, options.Until)
 	if err != nil {
 		return fmt.Errorf("failed to parse event filters: %w", err)
@@ -112,13 +139,15 @@ func (e EventJournalD) Read(ctx context.Context, options ReadOptions) error {
 		return err
 	}
 	defer func() {
-		if err := j.Close(); err != nil {
-			logrus.Errorf("Unable to close journal :%v", err)
+		if retErr != nil {
+			if err := j.Close(); err != nil {
+				logrus.Errorf("Unable to close journal :%v", err)
+			}
 		}
 	}()
 	err = j.SetDataThreshold(0)
 	if err != nil {
-		logrus.Warnf("cannot set data threshold: %v", err)
+		return fmt.Errorf("cannot set data threshold for journal: %v", err)
 	}
 	// match only podman journal entries
 	podmanJournal := sdjournal.Match{Field: "SYSLOG_IDENTIFIER", Value: "podman"}
@@ -153,30 +182,40 @@ func (e EventJournalD) Read(ctx context.Context, options ReadOptions) error {
 		}
 	}
 
-	for {
-		entry, err := GetNextEntry(ctx, j, options.Stream, untilTime)
-		if err != nil {
-			return err
-		}
-		// no entry == we hit the end
-		if entry == nil {
-			return nil
-		}
-
-		newEvent, err := newEventFromJournalEntry(entry)
-		if err != nil {
-			// We can't decode this event.
-			// Don't fail hard - that would make events unusable.
-			// Instead, log and continue.
-			if !errors.Is(err, ErrEventTypeBlank) {
-				logrus.Errorf("Unable to decode event: %v", err)
+	go func() {
+		defer close(options.EventChannel)
+		defer func() {
+			if err := j.Close(); err != nil {
+				logrus.Errorf("Unable to close journal :%v", err)
 			}
-			continue
+		}()
+		for {
+			entry, err := GetNextEntry(ctx, j, options.Stream, untilTime)
+			if err != nil {
+				options.EventChannel <- ReadResult{Error: err}
+				break
+			}
+			// no entry == we hit the end
+			if entry == nil {
+				break
+			}
+
+			newEvent, err := newEventFromJournalEntry(entry)
+			if err != nil {
+				// We can't decode this event.
+				// Don't fail hard - that would make events unusable.
+				// Instead, log and continue.
+				if !errors.Is(err, ErrEventTypeBlank) {
+					options.EventChannel <- ReadResult{Error: fmt.Errorf("unable to decode event: %v", err)}
+				}
+				continue
+			}
+			if applyFilters(newEvent, filterMap) {
+				options.EventChannel <- ReadResult{Event: newEvent}
+			}
 		}
-		if applyFilters(newEvent, filterMap) {
-			options.EventChannel <- newEvent
-		}
-	}
+	}()
+	return nil
 }
 
 func newEventFromJournalEntry(entry *sdjournal.JournalEntry) (*Event, error) {
@@ -211,24 +250,26 @@ func newEventFromJournalEntry(entry *sdjournal.JournalEntry) (*Event, error) {
 				newEvent.ContainerExitCode = &intCode
 			}
 		}
-
-		// we need to check for the presence of labels recorded to a container event
-		if stringLabels, ok := entry.Fields["PODMAN_LABELS"]; ok && len(stringLabels) > 0 {
-			labels := make(map[string]string, 0)
-			if err := json.Unmarshal([]byte(stringLabels), &labels); err != nil {
-				return nil, err
-			}
-
-			// if we have labels, add them to the event
-			if len(labels) > 0 {
-				newEvent.Attributes = labels
-			}
+		if err := getLabelsFromJournal(entry, &newEvent); err != nil {
+			return nil, err
 		}
 		newEvent.HealthStatus = entry.Fields["PODMAN_HEALTH_STATUS"]
+		if log, ok := entry.Fields["PODMAN_HEALTH_LOG"]; ok {
+			newEvent.HealthLog = log
+		}
+		if FailingStreak, ok := entry.Fields["PODMAN_HEALTH_FAILING_STREAK"]; ok {
+			FailingStreakInt, err := strconv.Atoi(FailingStreak)
+			if err == nil {
+				newEvent.HealthFailingStreak = FailingStreakInt
+			}
+		}
 		newEvent.Details.ContainerInspectData = entry.Fields["PODMAN_CONTAINER_INSPECT_DATA"]
 	case Network:
 		newEvent.ID = entry.Fields["PODMAN_ID"]
 		newEvent.Network = entry.Fields["PODMAN_NETWORK_NAME"]
+		if err := getLabelsFromJournal(entry, &newEvent); err != nil {
+			return nil, err
+		}
 	case Image:
 		newEvent.ID = entry.Fields["PODMAN_ID"]
 		if val, ok := entry.Fields["ERROR"]; ok {

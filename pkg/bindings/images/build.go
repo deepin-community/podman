@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
@@ -16,13 +17,16 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/blang/semver/v4"
 	"github.com/containers/buildah/define"
 	imageTypes "github.com/containers/image/v5/types"
 	ldefine "github.com/containers/podman/v5/libpod/define"
 	"github.com/containers/podman/v5/pkg/auth"
 	"github.com/containers/podman/v5/pkg/bindings"
 	"github.com/containers/podman/v5/pkg/domain/entities/types"
+	"github.com/containers/podman/v5/pkg/specgen"
 	"github.com/containers/podman/v5/pkg/util"
+	"github.com/containers/storage/pkg/archive"
 	"github.com/containers/storage/pkg/fileutils"
 	"github.com/containers/storage/pkg/ioutils"
 	"github.com/containers/storage/pkg/regexp"
@@ -47,6 +51,42 @@ type BuildResponse struct {
 	// NOTE: `error` is being deprecated check https://github.com/moby/moby/blob/master/pkg/jsonmessage/jsonmessage.go#L148
 	ErrorMessage string          `json:"error,omitempty"` // deprecate this slowly
 	Aux          json.RawMessage `json:"aux,omitempty"`
+}
+
+// Modify the build contexts that uses a local windows path. The windows path is
+// converted into the corresping guest path in the default Windows machine
+// (e.g. C:\test ==> /mnt/c/test).
+func convertAdditionalBuildContexts(additionalBuildContexts map[string]*define.AdditionalBuildContext) {
+	for _, context := range additionalBuildContexts {
+		if !context.IsImage && !context.IsURL {
+			path, err := specgen.ConvertWinMountPath(context.Value)
+			// It's not worth failing if the path can't be converted
+			if err == nil {
+				context.Value = path
+			}
+		}
+	}
+}
+
+// convertVolumeSrcPath converts windows paths in the HOST-DIR part of a volume
+// into the corresponding path in the default Windows machine.
+// (e.g. C:\test:/src/docs ==> /mnt/c/test:/src/docs).
+// If any error occurs while parsing the volume string, the original volume
+// string is returned.
+func convertVolumeSrcPath(volume string) string {
+	splitVol := specgen.SplitVolumeString(volume)
+	if len(splitVol) < 2 || len(splitVol) > 3 {
+		return volume
+	}
+	convertedSrcPath, err := specgen.ConvertWinMountPath(splitVol[0])
+	if err != nil {
+		return volume
+	}
+	if len(splitVol) == 2 {
+		return convertedSrcPath + ":" + splitVol[1]
+	} else {
+		return convertedSrcPath + ":" + splitVol[1] + ":" + splitVol[2]
+	}
 }
 
 // Build creates an image using a containerfile reference
@@ -89,13 +129,7 @@ func Build(ctx context.Context, containerFiles []string, options types.BuildOpti
 	for _, tag := range options.AdditionalTags {
 		params.Add("t", tag)
 	}
-	if additionalBuildContexts := options.AdditionalBuildContexts; len(additionalBuildContexts) > 0 {
-		additionalBuildContextMap, err := jsoniter.Marshal(additionalBuildContexts)
-		if err != nil {
-			return nil, err
-		}
-		params.Set("additionalbuildcontexts", string(additionalBuildContextMap))
-	}
+
 	if options.IDMappingOptions != nil {
 		idmappingsOptions, err := jsoniter.Marshal(options.IDMappingOptions)
 		if err != nil {
@@ -196,6 +230,25 @@ func Build(ctx context.Context, containerFiles []string, options types.BuildOpti
 	if options.IgnoreUnrecognizedInstructions {
 		params.Set("ignore", "1")
 	}
+	switch options.CreatedAnnotation {
+	case imageTypes.OptionalBoolFalse:
+		params.Set("createdannotation", "0")
+	case imageTypes.OptionalBoolTrue:
+		params.Set("createdannotation", "1")
+	}
+	switch options.InheritLabels {
+	case imageTypes.OptionalBoolFalse:
+		params.Set("inheritlabels", "0")
+	case imageTypes.OptionalBoolTrue:
+		params.Set("inheritlabels", "1")
+	}
+
+	if options.InheritAnnotations == imageTypes.OptionalBoolFalse {
+		params.Set("inheritannotations", "0")
+	} else {
+		params.Set("inheritannotations", "1")
+	}
+
 	params.Set("isolation", strconv.Itoa(int(options.Isolation)))
 	if options.CommonBuildOpts.HTTPProxy {
 		params.Set("httpproxy", "1")
@@ -239,6 +292,10 @@ func Build(ctx context.Context, containerFiles []string, options types.BuildOpti
 	if len(options.RusageLogFile) > 0 {
 		params.Set("rusagelogfile", options.RusageLogFile)
 	}
+
+	params.Set("retry", strconv.Itoa(options.MaxPullPushRetries))
+	params.Set("retry-delay", options.PullPushRetryDelay.String())
+
 	if len(options.Manifest) > 0 {
 		params.Set("manifest", options.Manifest)
 	}
@@ -290,6 +347,9 @@ func Build(ctx context.Context, containerFiles []string, options types.BuildOpti
 	if options.NoCache {
 		params.Set("nocache", "1")
 	}
+	if options.CommonBuildOpts.NoHosts {
+		params.Set("nohosts", "1")
+	}
 	if t := options.Output; len(t) > 0 {
 		params.Set("output", t)
 	}
@@ -332,7 +392,7 @@ func Build(ctx context.Context, containerFiles []string, options types.BuildOpti
 	}
 
 	for _, volume := range options.CommonBuildOpts.Volumes {
-		params.Add("volume", volume)
+		params.Add("volume", convertVolumeSrcPath(volume))
 	}
 
 	for _, group := range options.GroupAdd {
@@ -388,8 +448,17 @@ func Build(ctx context.Context, containerFiles []string, options types.BuildOpti
 		params.Set("squash", "1")
 	}
 
+	if options.SourceDateEpoch != nil {
+		t := options.SourceDateEpoch
+		params.Set("sourcedateepoch", strconv.FormatInt(t.Unix(), 10))
+	}
+	if options.RewriteTimestamp {
+		params.Set("rewritetimestamp", "1")
+	} else {
+		params.Set("rewritetimestamp", "0")
+	}
 	if options.Timestamp != nil {
-		t := *options.Timestamp
+		t := options.Timestamp
 		params.Set("timestamp", strconv.FormatInt(t.Unix(), 10))
 	}
 
@@ -411,6 +480,10 @@ func Build(ctx context.Context, containerFiles []string, options types.BuildOpti
 
 	for _, ulabel := range options.UnsetLabels {
 		params.Add("unsetlabel", ulabel)
+	}
+
+	for _, uannotation := range options.UnsetAnnotations {
+		params.Add("unsetannotation", uannotation)
 	}
 
 	var (
@@ -589,11 +662,147 @@ func Build(ctx context.Context, containerFiles []string, options types.BuildOpti
 		}
 	}()
 
+	var requestBody io.Reader
+	var contentType string
+
+	// If there are additional build contexts, we need to handle them based on the server version
+	// podman version >= 5.6.0 supports multipart/form-data for additional build contexts that
+	// are local directories or archives. URLs and images are still sent as query parameters.
+	if len(options.AdditionalBuildContexts) > 0 {
+		serverVersion := bindings.ServiceVersion(ctx)
+
+		// Extract just the version numbers (remove -dev, -rc, etc)
+		versionStr := serverVersion.String()
+		if idx := strings.Index(versionStr, "-"); idx > 0 {
+			versionStr = versionStr[:idx]
+		}
+
+		serverVer, err := semver.ParseTolerant(versionStr)
+		if err != nil {
+			return nil, fmt.Errorf("parsing server version %q: %w", serverVersion, err)
+		}
+
+		minMultipartVersion, _ := semver.ParseTolerant("5.6.0")
+
+		if serverVer.GTE(minMultipartVersion) {
+			imageContexts := make(map[string]string)
+			urlContexts := make(map[string]string)
+			localContexts := make(map[string]*define.AdditionalBuildContext)
+
+			for name, context := range options.AdditionalBuildContexts {
+				switch {
+				case context.IsImage:
+					imageContexts[name] = context.Value
+				case context.IsURL:
+					urlContexts[name] = context.Value
+				default:
+					localContexts[name] = context
+				}
+			}
+
+			logrus.Debugf("URL Contexts: %v", urlContexts)
+			for name, url := range urlContexts {
+				params.Add("additionalbuildcontexts", fmt.Sprintf("%s=url:%s", name, url))
+			}
+
+			logrus.Debugf("Image Contexts: %v", imageContexts)
+			for name, imageRef := range imageContexts {
+				params.Add("additionalbuildcontexts", fmt.Sprintf("%s=image:%s", name, imageRef))
+			}
+
+			if len(localContexts) > 0 {
+				// Multipart request structure:
+				// - "MainContext": The main build context as a tar file
+				// - "build-context-<name>": Each additional local context as a tar file
+				logrus.Debugf("Using additional local build contexts: %v", localContexts)
+				pr, pw := io.Pipe()
+				writer := multipart.NewWriter(pw)
+				contentType = writer.FormDataContentType()
+				requestBody = pr
+
+				if headers == nil {
+					headers = make(http.Header)
+				}
+				headers.Set("Content-Type", contentType)
+
+				go func() {
+					defer pw.Close()
+					defer writer.Close()
+
+					mainContext, err := writer.CreateFormFile("MainContext", "MainContext.tar")
+					if err != nil {
+						pw.CloseWithError(fmt.Errorf("creating form file for main context: %w", err))
+						return
+					}
+
+					if _, err := io.Copy(mainContext, tarfile); err != nil {
+						pw.CloseWithError(fmt.Errorf("copying main context: %w", err))
+						return
+					}
+
+					for name, context := range localContexts {
+						logrus.Debugf("Processing additional local context: %s", name)
+						part, err := writer.CreateFormFile(fmt.Sprintf("build-context-%s", name), name)
+						if err != nil {
+							pw.CloseWithError(fmt.Errorf("creating form file for context %q: %w", name, err))
+							return
+						}
+
+						// Context is already a tar
+						if archive.IsArchivePath(context.Value) {
+							file, err := os.Open(context.Value)
+							if err != nil {
+								pw.CloseWithError(fmt.Errorf("opening archive %q: %w", name, err))
+								return
+							}
+							if _, err := io.Copy(part, file); err != nil {
+								file.Close()
+								pw.CloseWithError(fmt.Errorf("copying context %q: %w", name, err))
+								return
+							}
+							file.Close()
+						} else {
+							tarContent, err := nTar(nil, context.Value)
+							if err != nil {
+								pw.CloseWithError(fmt.Errorf("creating tar content %q: %w", name, err))
+								return
+							}
+							if _, err = io.Copy(part, tarContent); err != nil {
+								pw.CloseWithError(fmt.Errorf("copying tar content %q: %w", name, err))
+								return
+							}
+							if err := tarContent.Close(); err != nil {
+								logrus.Errorf("Error closing tar content for context %q: %v\n", name, err)
+							}
+						}
+					}
+				}()
+				logrus.Debugf("Multipart body is created with content type: %s", contentType)
+			} else {
+				requestBody = tarfile
+				logrus.Debugf("Using main build context: %q", options.ContextDirectory)
+			}
+		} else {
+			convertAdditionalBuildContexts(options.AdditionalBuildContexts)
+			additionalBuildContextMap, err := jsoniter.Marshal(options.AdditionalBuildContexts)
+			if err != nil {
+				return nil, err
+			}
+			params.Set("additionalbuildcontexts", string(additionalBuildContextMap))
+
+			requestBody = tarfile
+			logrus.Debugf("Using main build context: %q", options.ContextDirectory)
+		}
+	} else {
+		requestBody = tarfile
+		logrus.Debugf("Using main build context: %q", options.ContextDirectory)
+	}
+
 	conn, err := bindings.GetClient(ctx)
 	if err != nil {
 		return nil, err
 	}
-	response, err := conn.DoRequest(ctx, tarfile, http.MethodPost, "/build", params, headers)
+	response, err := conn.DoRequest(ctx, requestBody, http.MethodPost, "/build", params, headers)
 	if err != nil {
 		return nil, err
 	}
@@ -742,9 +951,6 @@ func nTar(excludes []string, sources ...string) (io.ReadCloser, error) {
 						return err
 					}
 					di, isHardLink := checkHardLink(info)
-					if err != nil {
-						return err
-					}
 
 					hdr, err := tar.FileInfoHeader(info, "")
 					if err != nil {

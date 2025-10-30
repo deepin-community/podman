@@ -18,9 +18,9 @@ import (
 	api "github.com/containers/podman/v5/pkg/api/types"
 	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/containers/podman/v5/pkg/domain/infra/abi"
+	"github.com/containers/podman/v5/pkg/specgenutil"
 	"github.com/containers/podman/v5/pkg/util"
 	"github.com/gorilla/schema"
-	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
 )
 
@@ -443,38 +443,31 @@ func UpdateContainer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	options := &handlers.UpdateEntities{Resources: &specs.LinuxResources{}}
-	if err := json.NewDecoder(r.Body).Decode(&options.Resources); err != nil {
+	options := &handlers.UpdateEntities{}
+	if err := json.NewDecoder(r.Body).Decode(&options); err != nil {
 		utils.Error(w, http.StatusInternalServerError, fmt.Errorf("decode(): %w", err))
 		return
 	}
-	err = ctr.Update(options.Resources, restartPolicy, restartRetries)
+
+	resourceLimits, err := specgenutil.UpdateMajorAndMinorNumbers(&options.LinuxResources, &options.UpdateContainerDevicesLimits)
+	if err != nil {
+		utils.InternalServerError(w, err)
+		return
+	}
+
+	updateOptions := &entities.ContainerUpdateOptions{
+		Resources:                       resourceLimits,
+		ChangedHealthCheckConfiguration: &options.UpdateHealthCheckConfig,
+		RestartPolicy:                   restartPolicy,
+		RestartRetries:                  restartRetries,
+		Env:                             options.Env,
+		UnsetEnv:                        options.UnsetEnv,
+	}
+
+	err = ctr.Update(updateOptions)
 	if err != nil {
 		utils.InternalServerError(w, err)
 		return
 	}
 	utils.WriteResponse(w, http.StatusCreated, ctr.ID())
-}
-
-func ShouldRestart(w http.ResponseWriter, r *http.Request) {
-	runtime := r.Context().Value(api.RuntimeKey).(*libpod.Runtime)
-	// Now use the ABI implementation to prevent us from having duplicate
-	// code.
-	containerEngine := abi.ContainerEngine{Libpod: runtime}
-
-	name := utils.GetName(r)
-	report, err := containerEngine.ShouldRestart(r.Context(), name)
-	if err != nil {
-		if errors.Is(err, define.ErrNoSuchCtr) {
-			utils.ContainerNotFound(w, name, err)
-			return
-		}
-		utils.InternalServerError(w, err)
-		return
-	}
-	if report.Value {
-		utils.WriteResponse(w, http.StatusNoContent, "")
-	} else {
-		utils.ContainerNotFound(w, name, define.ErrNoSuchCtr)
-	}
 }

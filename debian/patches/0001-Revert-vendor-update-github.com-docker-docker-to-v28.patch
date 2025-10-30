@@ -1,0 +1,175 @@
+From: Reinhard Tartler <siretart@tauware.de>
+Date: Mon, 20 Oct 2025 05:52:28 -0400
+Subject: Revert "vendor: update github.com/docker/docker to v28.2.2"
+
+This reverts commit d44f0afa84a620127a9a4ece2eb8a7bd20b7a9fc.
+---
+ go.mod                            |  6 +++--
+ go.sum                            |  2 ++
+ pkg/api/handlers/compat/images.go | 56 +++++++++++++++++++++++++++++----------
+ pkg/api/handlers/compat/info.go   |  2 ++
+ pkg/api/handlers/compat/system.go |  4 +--
+ 5 files changed, 52 insertions(+), 18 deletions(-)
+
+diff --git a/go.mod b/go.mod
+index 9807718..7ef9d7b 100644
+--- a/go.mod
++++ b/go.mod
+@@ -26,7 +26,7 @@ require (
+ 	github.com/cyphar/filepath-securejoin v0.4.1
+ 	github.com/digitalocean/go-qemu v0.0.0-20250212194115-ee9b0668d242
+ 	github.com/docker/distribution v2.8.3+incompatible
+-	github.com/docker/docker v28.3.3+incompatible
++	github.com/docker/docker v28.1.1+incompatible
+ 	github.com/docker/go-connections v0.5.0
+ 	github.com/docker/go-plugins-helpers v0.0.0-20240701071450-45e2431495c8
+ 	github.com/docker/go-units v0.5.0
+@@ -45,7 +45,6 @@ require (
+ 	github.com/mattn/go-shellwords v1.0.12
+ 	github.com/mattn/go-sqlite3 v1.14.28
+ 	github.com/mdlayher/vsock v1.2.1
+-	github.com/moby/docker-image-spec v1.3.1
+ 	github.com/moby/sys/capability v0.4.0
+ 	github.com/moby/sys/user v0.4.0
+ 	github.com/moby/term v0.5.2
+@@ -138,6 +137,9 @@ require (
+ 	github.com/miekg/pkcs11 v1.1.1 // indirect
+ 	github.com/mistifyio/go-zfs/v3 v3.0.1 // indirect
+ 	github.com/moby/buildkit v0.23.2 // indirect
++	github.com/mitchellh/mapstructure v1.5.0 // indirect
++	github.com/moby/buildkit v0.22.0 // indirect
++	github.com/moby/docker-image-spec v1.3.1 // indirect
+ 	github.com/moby/go-archive v0.1.0 // indirect
+ 	github.com/moby/patternmatcher v0.6.0 // indirect
+ 	github.com/moby/sys/mountinfo v0.7.2 // indirect
+diff --git a/go.sum b/go.sum
+index b365dba..1c03c6d 100644
+--- a/go.sum
++++ b/go.sum
+@@ -119,6 +119,8 @@ github.com/docker/distribution v2.8.3+incompatible h1:AtKxIZ36LoNK51+Z6RpzLpddBi
+ github.com/docker/distribution v2.8.3+incompatible/go.mod h1:J2gT2udsDAN96Uj4KfcMRqY0/ypR+oyYUYmja8H+y+w=
+ github.com/docker/docker v28.3.3+incompatible h1:Dypm25kh4rmk49v1eiVbsAtpAsYURjYkaKubwuBdxEI=
+ github.com/docker/docker v28.3.3+incompatible/go.mod h1:eEKB0N0r5NX/I1kEveEz05bcu8tLC/8azJZsviup8Sk=
++github.com/docker/docker v28.1.1+incompatible h1:49M11BFLsVO1gxY9UX9p/zwkE/rswggs8AdFmXQw51I=
++github.com/docker/docker v28.1.1+incompatible/go.mod h1:eEKB0N0r5NX/I1kEveEz05bcu8tLC/8azJZsviup8Sk=
+ github.com/docker/docker-credential-helpers v0.9.3 h1:gAm/VtF9wgqJMoxzT3Gj5p4AqIjCBS4wrsOh9yRqcz8=
+ github.com/docker/docker-credential-helpers v0.9.3/go.mod h1:x+4Gbw9aGmChi3qTLZj8Dfn0TD20M/fuWy0E5+WDeCo=
+ github.com/docker/go-connections v0.5.0 h1:USnMq7hx7gwdVZq1L49hLXaFtUdTADjXGp+uj1Br63c=
+diff --git a/pkg/api/handlers/compat/images.go b/pkg/api/handlers/compat/images.go
+index e9fdab5..fc98870 100644
+--- a/pkg/api/handlers/compat/images.go
++++ b/pkg/api/handlers/compat/images.go
+@@ -29,9 +29,8 @@ import (
+ 	dockerContainer "github.com/docker/docker/api/types/container"
+ 	dockerImage "github.com/docker/docker/api/types/image"
+ 	dockerStorage "github.com/docker/docker/api/types/storage"
+-	dockerSpec "github.com/moby/docker-image-spec/specs-go/v1"
++	"github.com/docker/go-connections/nat"
+ 	"github.com/opencontainers/go-digest"
+-	imageSpec "github.com/opencontainers/image-spec/specs-go/v1"
+ 	"github.com/sirupsen/logrus"
+ )
+ 
+@@ -355,20 +354,22 @@ func imageDataToImageInspect(ctx context.Context, l *libimage.Image, r *http.Req
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	ports, err := portsToPortSet(info.Config.ExposedPorts)
++	if err != nil {
++		return nil, err
++	}
+ 
+ 	// TODO: many fields in Config still need wiring
+-	config := dockerSpec.DockerOCIImageConfig{
+-		ImageConfig: imageSpec.ImageConfig{
+-			User:         info.User,
+-			ExposedPorts: info.Config.ExposedPorts,
+-			Env:          info.Config.Env,
+-			Cmd:          info.Config.Cmd,
+-			Volumes:      info.Config.Volumes,
+-			WorkingDir:   info.Config.WorkingDir,
+-			Entrypoint:   info.Config.Entrypoint,
+-			Labels:       info.Labels,
+-			StopSignal:   info.Config.StopSignal,
+-		},
++	config := dockerContainer.Config{
++		User:         info.User,
++		ExposedPorts: ports,
++		Env:          info.Config.Env,
++		Cmd:          info.Config.Cmd,
++		Volumes:      info.Config.Volumes,
++		WorkingDir:   info.Config.WorkingDir,
++		Entrypoint:   info.Config.Entrypoint,
++		Labels:       info.Labels,
++		StopSignal:   info.Config.StopSignal,
+ 	}
+ 
+ 	rootfs := dockerImage.RootFS{}
+@@ -418,6 +419,33 @@ func imageDataToImageInspect(ctx context.Context, l *libimage.Image, r *http.Req
+ 	return &handlers.ImageInspect{InspectResponse: dockerImageInspect}, nil
+ }
+ 
++// portsToPortSet converts libpod's exposed ports to docker's structs
++func portsToPortSet(input map[string]struct{}) (nat.PortSet, error) {
++	ports := make(nat.PortSet)
++	for k := range input {
++		proto, port := nat.SplitProtoPort(k)
++		switch proto {
++		// See the OCI image spec for details:
++		// https://github.com/opencontainers/image-spec/blob/e562b04403929d582d449ae5386ff79dd7961a11/config.md#properties
++		case "tcp", "":
++			p, err := nat.NewPort("tcp", port)
++			if err != nil {
++				return nil, fmt.Errorf("unable to create tcp port from %s: %w", k, err)
++			}
++			ports[p] = struct{}{}
++		case "udp":
++			p, err := nat.NewPort("udp", port)
++			if err != nil {
++				return nil, fmt.Errorf("unable to create tcp port from %s: %w", k, err)
++			}
++			ports[p] = struct{}{}
++		default:
++			return nil, fmt.Errorf("invalid port proto %q in %q", proto, k)
++		}
++	}
++	return ports, nil
++}
++
+ func GetImages(w http.ResponseWriter, r *http.Request) {
+ 	decoder := utils.GetDecoder(r)
+ 	runtime := r.Context().Value(api.RuntimeKey).(*libpod.Runtime)
+diff --git a/pkg/api/handlers/compat/info.go b/pkg/api/handlers/compat/info.go
+index c6dc7e2..b4c8291 100644
+--- a/pkg/api/handlers/compat/info.go
++++ b/pkg/api/handlers/compat/info.go
+@@ -56,6 +56,8 @@ func GetInfo(w http.ResponseWriter, r *http.Request) {
+ 	info := &handlers.Info{
+ 		Info: dockerSystem.Info{
+ 			Architecture:        goRuntime.GOARCH,
++			BridgeNfIP6tables:   !sysInfo.BridgeNFCallIP6TablesDisabled,
++			BridgeNfIptables:    !sysInfo.BridgeNFCallIPTablesDisabled,
+ 			CPUCfsPeriod:        sysInfo.CPUCfsPeriod,
+ 			CPUCfsQuota:         sysInfo.CPUCfsQuota,
+ 			CPUSet:              sysInfo.Cpuset,
+diff --git a/pkg/api/handlers/compat/system.go b/pkg/api/handlers/compat/system.go
+index b839272..2688d8d 100644
+--- a/pkg/api/handlers/compat/system.go
++++ b/pkg/api/handlers/compat/system.go
+@@ -14,7 +14,6 @@ import (
+ 	"github.com/containers/podman/v5/pkg/domain/entities"
+ 	"github.com/containers/podman/v5/pkg/domain/infra/abi"
+ 	docker "github.com/docker/docker/api/types"
+-	"github.com/docker/docker/api/types/build"
+ 	"github.com/docker/docker/api/types/container"
+ 	dockerImage "github.com/docker/docker/api/types/image"
+ 	"github.com/docker/docker/api/types/volume"
+@@ -103,6 +102,7 @@ func GetDiskUsage(w http.ResponseWriter, r *http.Request) {
+ 		Images:     imgs,
+ 		Containers: ctnrs,
+ 		Volumes:    vols,
+-		BuildCache: []*build.CacheRecord{},
++		BuildCache:  []*docker.BuildCache{},
++		BuilderSize: 0,
+ 	}})
+ }

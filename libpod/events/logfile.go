@@ -34,7 +34,7 @@ func newLogFileEventer(options EventerOptions) (*EventLogFile, error) {
 	}
 	// We have to make sure the file is created otherwise reading events will hang.
 	// https://github.com/containers/podman/issues/15688
-	fd, err := os.OpenFile(options.LogFilePath, os.O_RDONLY|os.O_CREATE, 0700)
+	fd, err := os.OpenFile(options.LogFilePath, os.O_RDONLY|os.O_CREATE, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create event log file: %w", err)
 	}
@@ -68,6 +68,7 @@ func (e EventLogFile) writeString(s string) error {
 	if err != nil {
 		return err
 	}
+	defer f.Close()
 	return writeToFile(s, f)
 }
 
@@ -108,7 +109,6 @@ func (e EventLogFile) readRotateEvent(event *Event) (begin bool, end bool, err e
 
 // Reads from the log file
 func (e EventLogFile) Read(ctx context.Context, options ReadOptions) error {
-	defer close(options.EventChannel)
 	filterMap, err := generateEventFilters(options.Filters, options.Since, options.Until)
 	if err != nil {
 		return fmt.Errorf("failed to parse event filters: %w", err)
@@ -148,56 +148,65 @@ func (e EventLogFile) Read(ctx context.Context, options ReadOptions) error {
 		return err
 	}
 
-	var line *tail.Line
-	var ok bool
-	var skipRotate bool
-	for {
-		select {
-		case <-ctx.Done():
-			// the consumer has cancelled
-			t.Kill(errors.New("hangup by client"))
-			return nil
-		case line, ok = <-t.Lines:
-			if !ok {
-				// channel was closed
-				return nil
+	go func() {
+		defer close(options.EventChannel)
+		var line *tail.Line
+		var ok bool
+		var skipRotate bool
+		for {
+			select {
+			case <-ctx.Done():
+				// the consumer has cancelled
+				t.Kill(errors.New("hangup by client"))
+				return
+			case line, ok = <-t.Lines:
+				if !ok {
+					// channel was closed
+					return
+				}
+				// fallthrough
 			}
-			// fallthrough
-		}
 
-		event, err := newEventFromJSONString(line.Text)
-		if err != nil {
-			return err
-		}
-		switch event.Type {
-		case Image, Volume, Pod, Container, Network:
-			//	no-op
-		case System:
-			begin, end, err := e.readRotateEvent(event)
+			event, err := newEventFromJSONString(line.Text)
 			if err != nil {
-				return err
+				err := fmt.Errorf("event type is not valid in %s", e.options.LogFilePath)
+				options.EventChannel <- ReadResult{Error: err}
+				continue
 			}
-			if begin && event.Time.After(readTime) {
-				// If the rotation event happened _after_ we
-				// started reading, we need to ignore/skip
-				// subsequent event until the end of the
-				// rotation.
-				skipRotate = true
-				logrus.Debugf("Skipping already read events after log-file rotation: %v", event)
-			} else if end {
-				// This rotate event
-				skipRotate = false
+			switch event.Type {
+			case Image, Volume, Pod, Container, Network, Secret:
+				//	no-op
+			case System:
+				begin, end, err := e.readRotateEvent(event)
+				if err != nil {
+					options.EventChannel <- ReadResult{Error: err}
+					continue
+				}
+				if begin && event.Time.After(readTime) {
+					// If the rotation event happened _after_ we
+					// started reading, we need to ignore/skip
+					// subsequent event until the end of the
+					// rotation.
+					skipRotate = true
+					logrus.Debugf("Skipping already read events after log-file rotation: %v", event)
+				} else if end {
+					// This rotate event
+					skipRotate = false
+				}
+			default:
+				err := fmt.Errorf("event type %s is not valid in %s", event.Type.String(), e.options.LogFilePath)
+				options.EventChannel <- ReadResult{Error: err}
+				continue
 			}
-		default:
-			return fmt.Errorf("event type %s is not valid in %s", event.Type.String(), e.options.LogFilePath)
+			if skipRotate {
+				continue
+			}
+			if applyFilters(event, filterMap) {
+				options.EventChannel <- ReadResult{Event: event}
+			}
 		}
-		if skipRotate {
-			continue
-		}
-		if applyFilters(event, filterMap) {
-			options.EventChannel <- event
-		}
-	}
+	}()
+	return nil
 }
 
 // String returns a string representation of the logger

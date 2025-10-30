@@ -120,8 +120,10 @@ func CreateContainer(w http.ResponseWriter, r *http.Request) {
 	// moby always create the working directory
 	localTrue := true
 	sg.CreateWorkingDir = &localTrue
-	// moby doesn't inherit /etc/hosts from host
-	sg.BaseHostsFile = "none"
+	// moby doesn't inherit /etc/hosts from host, but only overwrite if not set in containers.conf
+	if rtc.Containers.BaseHostsFile == "" {
+		sg.BaseHostsFile = "none"
+	}
 
 	ic := abi.ContainerEngine{Libpod: runtime}
 	report, err := ic.ContainerCreate(r.Context(), sg)
@@ -163,6 +165,11 @@ func cliOpts(cc handlers.CreateContainerConfig, rtc *config.Config) (*entities.C
 	for _, dev := range cc.HostConfig.Devices {
 		devices = append(devices, fmt.Sprintf("%s:%s:%s", dev.PathOnHost, dev.PathInContainer, dev.CgroupPermissions))
 	}
+	for _, r := range cc.HostConfig.Resources.DeviceRequests {
+		if r.Driver == "cdi" {
+			devices = append(devices, r.DeviceIDs...)
+		}
+	}
 
 	// iterate blkreaddevicebps
 	readBps := make([]string, 0, len(cc.HostConfig.BlkioDeviceReadBps))
@@ -202,6 +209,12 @@ func cliOpts(cc handlers.CreateContainerConfig, rtc *config.Config) (*entities.C
 			jsonString := string(b)
 			entrypoint = &jsonString
 		}
+	} else if cc.Config.Entrypoint != nil {
+		// Entrypoint in HTTP request is set, but it is an empty slice.
+		// Set the entrypoint to empty string slice, because keeping it set to nil
+		// would later fallback to default entrypoint.
+		emptySlice := "[]"
+		entrypoint = &emptySlice
 	}
 
 	// expose ports
@@ -423,70 +436,74 @@ func cliOpts(cc handlers.CreateContainerConfig, rtc *config.Config) (*entities.C
 		CPUSetMems: cc.HostConfig.CpusetMems,
 		// Detach:            false, // don't need
 		// DetachKeys:        "",    // don't need
-		Devices:           devices,
-		DeviceCgroupRule:  cc.HostConfig.DeviceCgroupRules,
-		DeviceReadBPs:     readBps,
-		DeviceReadIOPs:    readIops,
-		DeviceWriteBPs:    writeBps,
-		DeviceWriteIOPs:   writeIops,
-		Entrypoint:        entrypoint,
-		Env:               cc.Config.Env,
-		Expose:            expose,
-		GroupAdd:          cc.HostConfig.GroupAdd,
-		Hostname:          cc.Config.Hostname,
-		ImageVolume:       "anonymous",
-		Init:              init,
-		Interactive:       cc.Config.OpenStdin,
-		IPC:               string(cc.HostConfig.IpcMode),
-		Label:             stringMaptoArray(cc.Config.Labels),
-		LogDriver:         cc.HostConfig.LogConfig.Type,
-		LogOptions:        stringMaptoArray(cc.HostConfig.LogConfig.Config),
-		Name:              cc.Name,
-		OOMScoreAdj:       &cc.HostConfig.OomScoreAdj,
-		Arch:              "",
-		OS:                "",
-		Variant:           "",
-		PID:               string(cc.HostConfig.PidMode),
-		PIDsLimit:         cc.HostConfig.PidsLimit,
-		Privileged:        cc.HostConfig.Privileged,
-		PublishAll:        cc.HostConfig.PublishAllPorts,
-		Quiet:             false,
-		ReadOnly:          cc.HostConfig.ReadonlyRootfs,
-		ReadWriteTmpFS:    true, // podman default
-		Rm:                cc.HostConfig.AutoRemove,
-		Annotation:        stringMaptoArray(cc.HostConfig.Annotations),
-		SecurityOpt:       cc.HostConfig.SecurityOpt,
-		StopSignal:        cc.Config.StopSignal,
-		StopTimeout:       rtc.Engine.StopTimeout, // podman default
-		StorageOpts:       stringMaptoArray(cc.HostConfig.StorageOpt),
-		Sysctl:            stringMaptoArray(cc.HostConfig.Sysctls),
-		Systemd:           "true", // podman default
-		TmpFS:             parsedTmp,
-		TTY:               cc.Config.Tty,
-		EnvMerge:          cc.EnvMerge,
-		UnsetEnv:          cc.UnsetEnv,
-		UnsetEnvAll:       cc.UnsetEnvAll,
-		User:              cc.Config.User,
-		UserNS:            string(cc.HostConfig.UsernsMode),
-		UTS:               string(cc.HostConfig.UTSMode),
-		Mount:             mounts,
-		VolumesFrom:       cc.HostConfig.VolumesFrom,
-		Workdir:           cc.Config.WorkingDir,
-		Net:               &netInfo,
-		HealthInterval:    define.DefaultHealthCheckInterval,
-		HealthRetries:     define.DefaultHealthCheckRetries,
-		HealthTimeout:     define.DefaultHealthCheckTimeout,
-		HealthStartPeriod: define.DefaultHealthCheckStartPeriod,
+		Devices:              devices,
+		DeviceCgroupRule:     cc.HostConfig.DeviceCgroupRules,
+		DeviceReadBPs:        readBps,
+		DeviceReadIOPs:       readIops,
+		DeviceWriteBPs:       writeBps,
+		DeviceWriteIOPs:      writeIops,
+		Entrypoint:           entrypoint,
+		Env:                  cc.Config.Env,
+		Expose:               expose,
+		GroupAdd:             cc.HostConfig.GroupAdd,
+		Hostname:             cc.Config.Hostname,
+		ImageVolume:          "anonymous",
+		Init:                 init,
+		Interactive:          cc.Config.OpenStdin,
+		IPC:                  string(cc.HostConfig.IpcMode),
+		Label:                stringMaptoArray(cc.Config.Labels),
+		LogDriver:            cc.HostConfig.LogConfig.Type,
+		LogOptions:           stringMaptoArray(cc.HostConfig.LogConfig.Config),
+		Name:                 cc.Name,
+		OOMScoreAdj:          &cc.HostConfig.OomScoreAdj,
+		Arch:                 "",
+		OS:                   "",
+		Variant:              "",
+		PID:                  string(cc.HostConfig.PidMode),
+		PIDsLimit:            cc.HostConfig.PidsLimit,
+		Privileged:           cc.HostConfig.Privileged,
+		PublishAll:           cc.HostConfig.PublishAllPorts,
+		Quiet:                false,
+		ReadOnly:             cc.HostConfig.ReadonlyRootfs,
+		ReadWriteTmpFS:       true, // podman default
+		Rm:                   cc.HostConfig.AutoRemove,
+		Annotation:           stringMaptoArray(cc.HostConfig.Annotations),
+		SecurityOpt:          cc.HostConfig.SecurityOpt,
+		StopSignal:           cc.Config.StopSignal,
+		StopTimeout:          rtc.Engine.StopTimeout, // podman default
+		StorageOpts:          stringMaptoArray(cc.HostConfig.StorageOpt),
+		Sysctl:               stringMaptoArray(cc.HostConfig.Sysctls),
+		Systemd:              "true", // podman default
+		TmpFS:                parsedTmp,
+		TTY:                  cc.Config.Tty,
+		EnvMerge:             cc.EnvMerge,
+		UnsetEnv:             cc.UnsetEnv,
+		UnsetEnvAll:          cc.UnsetEnvAll,
+		User:                 cc.Config.User,
+		UserNS:               string(cc.HostConfig.UsernsMode),
+		UTS:                  string(cc.HostConfig.UTSMode),
+		CgroupNS:             string(cc.HostConfig.CgroupnsMode),
+		Mount:                mounts,
+		VolumesFrom:          cc.HostConfig.VolumesFrom,
+		Workdir:              cc.Config.WorkingDir,
+		Net:                  &netInfo,
+		HealthInterval:       define.DefaultHealthCheckInterval,
+		HealthRetries:        define.DefaultHealthCheckRetries,
+		HealthTimeout:        define.DefaultHealthCheckTimeout,
+		HealthStartPeriod:    define.DefaultHealthCheckStartPeriod,
+		HealthLogDestination: define.DefaultHealthCheckLocalDestination,
+		HealthMaxLogCount:    define.DefaultHealthMaxLogCount,
+		HealthMaxLogSize:     define.DefaultHealthMaxLogSize,
 	}
-	if !rootless.IsRootless() {
-		var ulimits []string
-		if len(cc.HostConfig.Ulimits) > 0 {
-			for _, ul := range cc.HostConfig.Ulimits {
-				ulimits = append(ulimits, ul.String())
-			}
-			cliOpts.Ulimit = ulimits
+
+	var ulimits []string
+	if len(cc.HostConfig.Ulimits) > 0 {
+		for _, ul := range cc.HostConfig.Ulimits {
+			ulimits = append(ulimits, ul.String())
 		}
+		cliOpts.Ulimit = ulimits
 	}
+
 	if cc.HostConfig.Resources.NanoCPUs > 0 {
 		if cliOpts.CPUPeriod != 0 || cliOpts.CPUQuota != 0 {
 			return nil, nil, fmt.Errorf("NanoCpus conflicts with CpuPeriod and CpuQuota")

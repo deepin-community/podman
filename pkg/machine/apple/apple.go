@@ -139,7 +139,7 @@ func GenerateSystemDFilesForVirtiofsMounts(mounts []machine.VirtIoFs) ([]ignitio
 	return unitFiles, nil
 }
 
-// StartGenericAppleVM is wrappered by apple provider methods and starts the vm
+// StartGenericAppleVM is wrapped by apple provider methods and starts the vm
 func StartGenericAppleVM(mc *vmconfigs.MachineConfig, cmdBinary string, bootloader vfConfig.Bootloader, endpoint string) (func() error, func() error, error) {
 	var (
 		ignitionSocket *define.VMFile
@@ -216,11 +216,6 @@ func StartGenericAppleVM(mc *vmconfigs.MachineConfig, cmdBinary string, bootload
 
 	cmd.Args = append(cmd.Args, endpointArgs...)
 
-	firstBoot, err := mc.IsFirstBoot()
-	if err != nil {
-		return nil, nil, err
-	}
-
 	if logrus.IsLevelEnabled(logrus.DebugLevel) {
 		debugDevArgs, err := GetDebugDevicesCMDArgs()
 		if err != nil {
@@ -230,7 +225,14 @@ func StartGenericAppleVM(mc *vmconfigs.MachineConfig, cmdBinary string, bootload
 		cmd.Args = append(cmd.Args, "--gui") // add command line switch to pop the gui open
 	}
 
-	if firstBoot {
+	if mc.LibKrunHypervisor != nil {
+		// Nested Virtualization requires an M3 chip or newer, and to be running
+		// macOS 15+. If those requirements are not met, then krunkit will ignore the
+		// argument and keep Nested Virtualization disabled.
+		cmd.Args = append(cmd.Args, "--nested")
+	}
+
+	if mc.IsFirstBoot() {
 		// If this is the first boot of the vm, we need to add the vsock
 		// device to vfkit so we can inject the ignition file
 		socketName := fmt.Sprintf("%s-%s", mc.Name, ignitionSocketName)
@@ -296,7 +298,7 @@ func StartGenericAppleVM(mc *vmconfigs.MachineConfig, cmdBinary string, bootload
 			return nil, nil, err
 		}
 		for _, arg := range cmd.Args {
-			_, err = f.WriteString(fmt.Sprintf("%q ", arg))
+			_, err = fmt.Fprintf(f, "%q ", arg)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -360,13 +362,19 @@ func CheckProcessRunning(processName string, pid int) error {
 		return fmt.Errorf("failed to read %s process status: %w", processName, err)
 	}
 	if pid > 0 {
-		// child exited
-		return fmt.Errorf("%s exited unexpectedly with exit code %d", processName, status.ExitStatus())
+		// Child exited, process is no longer running
+		if status.Exited() {
+			return fmt.Errorf("%s exited unexpectedly with exit code %d", processName, status.ExitStatus())
+		}
+		if status.Signaled() {
+			return fmt.Errorf("%s was terminated by signal: %s", processName, status.Signal().String())
+		}
+		return fmt.Errorf("%s exited unexpectedly", processName)
 	}
 	return nil
 }
 
-// StartGenericNetworking is wrappered by apple provider methods
+// StartGenericNetworking is wrapped by apple provider methods
 func StartGenericNetworking(mc *vmconfigs.MachineConfig, cmd *gvproxy.GvproxyCommand) error {
 	gvProxySock, err := mc.GVProxySocket()
 	if err != nil {

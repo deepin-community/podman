@@ -1,12 +1,8 @@
-# uscan(1) configuration file.
-version=4
+Version: 5
 
-opts="\
-pgpmode=none,\
-repacksuffix=+ds1,\
-repack,compression=xz,\
-dirversionmangle=s/-rc/~rc/,\
-uversionmangle=s/-rc/~rc/,\
-dversionmangle=s{[+~]ds\d*}{},\
-" https://github.com/containers/podman/tags \
-  .*/v?@ANY_VERSION@@ARCHIVE_EXT@
+Template: Github
+Owner: containers
+Project: podman
+Dversion-Mangle: auto
+Uversion-Mangle: auto
+Repacksuffix: +ds1

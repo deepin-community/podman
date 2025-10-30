@@ -15,6 +15,7 @@ import (
 	"github.com/containers/podman/v5/pkg/machine"
 	provider2 "github.com/containers/podman/v5/pkg/machine/provider"
 	"github.com/containers/podman/v5/pkg/machine/shim"
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
 
@@ -46,17 +47,18 @@ func init() {
 }
 
 func reset(_ *cobra.Command, _ []string) error {
-	var (
-		err error
-	)
-
-	providers, err := provider2.GetAll(resetOptions.Force)
-	if err != nil {
-		return err
+	allProviders := provider2.GetAll()
+	for _, p := range allProviders {
+		hasPerms := provider2.HasPermsForProvider(p.VMType())
+		isInstalled, err := provider2.IsInstalled(p.VMType())
+		if !hasPerms && (isInstalled || err != nil) && !resetOptions.Force {
+			logrus.Warnf("Managing %s machines require admin authority.", p.VMType().String())
+			logrus.Warnf("Continuing to reset may cause Podman to be unaware of remaining VMs in the VM manager.")
+		}
 	}
 
 	if !resetOptions.Force {
-		listResponse, err := shim.List(providers, machine.ListOptions{})
+		listResponse, err := shim.List(allProviders, machine.ListOptions{})
 		if err != nil {
 			return err
 		}
@@ -73,7 +75,7 @@ func reset(_ *cobra.Command, _ []string) error {
 			return nil
 		}
 	}
-	return shim.Reset(providers, resetOptions)
+	return shim.Reset(allProviders, resetOptions)
 }
 
 func resetConfirmationMessage(listResponse []*machine.ListResponse) {

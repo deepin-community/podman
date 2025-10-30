@@ -69,7 +69,7 @@ func LogDriver() string {
 	return ""
 }
 
-// DefineCreateDefault is used to initialize ctr create options before flag initialization
+// DefineCreateDefaults is used to initialize ctr create options before flag initialization
 func DefineCreateDefaults(opts *entities.ContainerCreateOptions) {
 	opts.LogDriver = LogDriver()
 	opts.CgroupsMode = cgroupConfig()
@@ -85,4 +85,7 @@ func DefineCreateDefaults(opts *entities.ContainerCreateOptions) {
 	opts.Ulimit = ulimits()
 	opts.SeccompPolicy = "default"
 	opts.Volume = volumes()
+	opts.HealthLogDestination = define.DefaultHealthCheckLocalDestination
+	opts.HealthMaxLogCount = define.DefaultHealthMaxLogCount
+	opts.HealthMaxLogSize = define.DefaultHealthMaxLogSize
 }

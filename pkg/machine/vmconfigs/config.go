@@ -27,8 +27,7 @@ type MachineConfig struct {
 	SSH       SSHConfig
 	Version   uint
 
-	// Image stuff
-	imageDescription machineImage //nolint:unused
+	Swap strongunits.MiB
 
 	ImagePath *define.VMFile // Temporary only until a proper image struct is worked out
 
@@ -39,7 +38,7 @@ type MachineConfig struct {
 	QEMUHypervisor    *QEMUConfig    `json:",omitempty"`
 	WSLHypervisor     *WSLConfig     `json:",omitempty"`
 
-	lock *lockfile.LockFile //nolint:unused
+	lock *lockfile.LockFile
 
 	// configPath can be used for reading, writing, removing
 	configPath *define.VMFile
@@ -53,36 +52,12 @@ type MachineConfig struct {
 	Starting bool
 
 	Rosetta bool
-}
 
-type machineImage interface { //nolint:unused
-	download() error
-	path() string
-}
-
-type OCIMachineImage struct {
-	// registry
-	// TODO JSON serial/deserial will write string to disk
-	// but in code it is a types.ImageReference
-
-	// quay.io/podman/podman-machine-image:5.0
-	FQImageReference string
-}
-
-func (o OCIMachineImage) path() string {
-	return ""
-}
-
-func (o OCIMachineImage) download() error {
-	return nil
+	Ansible *AnsibleConfig
 }
 
 type VMProvider interface { //nolint:interfacebloat
 	CreateVM(opts define.CreateVMOpts, mc *MachineConfig, builder *ignition.IgnitionBuilder) error
-	// GetDisk should be only temporary.  It is largely here only because WSL disk pulling is different
-	// TODO
-	// Let's deprecate this ASAP
-	GetDisk(userInputPath string, dirs *define.MachineDirs, mc *MachineConfig) error
 	PrepareIgnition(mc *MachineConfig, ignBuilder *ignition.IgnitionBuilder) (*ignition.ReadyUnitOpts, error)
 	Exists(name string) (bool, error)
 	MountType() VolumeMountType
@@ -151,4 +126,10 @@ type VMStats struct {
 	Created time.Time
 	// LastUp contains the last recorded uptime
 	LastUp time.Time
+}
+
+type AnsibleConfig struct {
+	PlaybookPath string
+	Contents     string
+	User         string
 }

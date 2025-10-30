@@ -3,6 +3,7 @@
 package machine
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -11,11 +12,10 @@ import (
 	"github.com/containers/podman/v5/cmd/podman/registry"
 	ldefine "github.com/containers/podman/v5/libpod/define"
 	"github.com/containers/podman/v5/libpod/events"
-	"github.com/containers/podman/v5/pkg/machine"
 	"github.com/containers/podman/v5/pkg/machine/define"
 	"github.com/containers/podman/v5/pkg/machine/shim"
 	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
-	"github.com/shirou/gopsutil/v3/mem"
+	"github.com/shirou/gopsutil/v4/mem"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
@@ -34,7 +34,7 @@ var (
 
 	initOpts           = define.InitOptions{}
 	initOptionalFlags  = InitOptionalFlags{}
-	defaultMachineName = machine.DefaultMachineName
+	defaultMachineName = define.DefaultMachineName
 	now                bool
 )
 
@@ -63,6 +63,10 @@ func init() {
 	)
 	_ = initCmd.RegisterFlagCompletionFunc(cpusFlagName, completion.AutocompleteNone)
 
+	runPlaybookFlagName := "playbook"
+	flags.StringVar(&initOpts.PlaybookPath, runPlaybookFlagName, "", "Run an Ansible playbook after first boot")
+	_ = initCmd.RegisterFlagCompletionFunc(runPlaybookFlagName, completion.AutocompleteDefault)
+
 	diskSizeFlagName := "disk-size"
 	flags.Uint64Var(
 		&initOpts.DiskSize,
@@ -79,6 +83,14 @@ func init() {
 		"Memory in MiB",
 	)
 	_ = initCmd.RegisterFlagCompletionFunc(memoryFlagName, completion.AutocompleteNone)
+
+	swapFlagName := "swap"
+	flags.Uint64VarP(
+		&initOpts.Swap,
+		swapFlagName, "s", 0,
+		"Swap in MiB",
+	)
+	_ = initCmd.RegisterFlagCompletionFunc(swapFlagName, completion.AutocompleteNone)
 
 	flags.BoolVar(
 		&now,
@@ -221,6 +233,14 @@ func initMachine(cmd *cobra.Command, args []string) error {
 
 	err = shim.Init(initOpts, provider)
 	if err != nil {
+		// The installation is partially complete and podman should
+		// exit gracefully with no error and no success message.
+		// Examples:
+		// - a user has chosen to perform their own reboot
+		// - reexec for limited admin operations, returning to parent
+		if errors.Is(err, define.ErrInitRelaunchAttempt) {
+			return nil
+		}
 		return err
 	}
 
@@ -246,7 +266,7 @@ func checkMaxMemory(newMem strongunits.MiB) error {
 		return err
 	}
 	if total := strongunits.B(memStat.Total); strongunits.B(memStat.Total) < newMem.ToBytes() {
-		return fmt.Errorf("requested amount of memory (%d MB) greater than total system memory (%d MB)", newMem, total)
+		return fmt.Errorf("requested amount of memory (%d MB) greater than total system memory (%d MB)", newMem, strongunits.ToMib(total))
 	}
 	return nil
 }

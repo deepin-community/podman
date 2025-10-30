@@ -91,6 +91,8 @@ The following environment variables are supported by the test setup:
  - `PODMAN_DB`: the database backend `sqlite` (default) or `boltdb`.
  - `PODMAN_TEST_IMAGE_CACHE_DIR`: path were the container images should be cached, defaults to `/tmp`.
 
+Note: These variables are used by the integration tests (test/e2e) only not the system tests (test/system).
+
 ### Running a single file of integration tests
 You can run a single file of integration tests using the go test command:
 
@@ -127,18 +129,32 @@ make localintegration FOCUS="podman inspect bogus pod"
 ```
 
 ### Controlling Ginkgo parameters
-You can control some of the parameters passed to Ginkgo
+You can control the parameters passed to Ginkgo.
+
+The flags already used can be set by their corresponding environment variable:
 
 - Disable parallel tests by setting `GINKGO_PARALLEL=n`
-- Set flake retry count (default 3) to one by setting `GINKGO_FLAKE_ATTEMPTS=1`
+- Set flake retry count (default 0) to one by setting `GINKGO_FLAKE_ATTEMPTS=1`
 - Produce colorful tests report by setting `GINKGO_NO_COLOR=n`
+
+For anything else, use `TESTFLAGS`.
+For example for failing fast, set `TESTFLAGS=--fail-fast`
 
 # System tests
 System tests are used for testing the *podman* CLI in the context of a complete system. It
 requires that *podman*, all dependencies, and configurations are in place.  The intention of
 system testing is to match as closely as possible with real-world user/developer use-cases
 and environments. The orchestration of the environments and tests is left to external
-tooling.
+tooling. To test a specific oci runtime it should be set in containers.conf.
+(Note, upstream only tests with crun, there is no guarantee that tests will pass with another
+runtime. We will accept patches to make the tests work with runc, e.g. mostly error message
+checks, but not other runtimes due to the high maintenance overhead.)
+
+Only the following env vars are supported:
+ - `PODMAN`: path to the podman binary, defaults to `podman` in $PATH.
+ - `QUADLET`: path to the quadlet binary, defaults to `/usr/libexec/podman/quadlet`.
+ - `PODMAN_TESTING`: path to the podman-testing binary, defaults to `../../bin/podman-testing` from the system test directory.
+   Note, the binary is used for testing purposes only and is not expected to be shipped to end users.
 
 System tests use Bash Automated Testing System (`bats`) as a testing framework.
 Install it via your package manager or get latest stable version

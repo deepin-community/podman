@@ -1,4 +1,4 @@
-//go:build linux || freebsd
+//go:build linux || freebsd || windows
 
 package qemu
 
@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -21,7 +20,6 @@ import (
 	"github.com/containers/podman/v5/pkg/machine/define"
 	"github.com/containers/podman/v5/pkg/machine/ignition"
 	"github.com/containers/podman/v5/pkg/machine/qemu/command"
-	"github.com/containers/podman/v5/pkg/machine/shim/diskpull"
 	"github.com/containers/podman/v5/pkg/machine/sockets"
 	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
 	"github.com/sirupsen/logrus"
@@ -41,15 +39,15 @@ var (
 	gvProxyMaxBackoffAttempts = 6
 )
 
-func (q QEMUStubber) UserModeNetworkEnabled(*vmconfigs.MachineConfig) bool {
+func (q *QEMUStubber) UserModeNetworkEnabled(*vmconfigs.MachineConfig) bool {
 	return true
 }
 
-func (q QEMUStubber) UseProviderNetworkSetup() bool {
+func (q *QEMUStubber) UseProviderNetworkSetup() bool {
 	return false
 }
 
-func (q QEMUStubber) RequireExclusiveActive() bool {
+func (q *QEMUStubber) RequireExclusiveActive() bool {
 	return true
 }
 
@@ -319,11 +317,15 @@ func (q *QEMUStubber) StartNetworking(mc *vmconfigs.MachineConfig, cmd *gvproxy.
 	if err != nil {
 		return err
 	}
+	socketURL, err := sockets.ToUnixURL(gvProxySock)
+	if err != nil {
+		return err
+	}
 	// make sure it does not exist before gvproxy is called
 	if err := gvProxySock.Delete(); err != nil {
 		logrus.Error(err)
 	}
-	cmd.AddQemuSocket(fmt.Sprintf("unix://%s", filepath.ToSlash(gvProxySock.GetPath())))
+	cmd.AddQemuSocket(socketURL.String())
 	return nil
 }
 
@@ -347,11 +349,11 @@ func (q *QEMUStubber) MountVolumesToVM(mc *vmconfigs.MachineConfig, quiet bool) 
 		if !strings.HasPrefix(mount.Target, "/home") && !strings.HasPrefix(mount.Target, "/mnt") {
 			args = append(args, "sudo", "chattr", "-i", "/", ";")
 		}
-		args = append(args, "sudo", "mkdir", "-p", mount.Target)
+		args = append(args, "sudo", "mkdir", "-p", strconv.Quote(mount.Target))
 		if !strings.HasPrefix(mount.Target, "/home") && !strings.HasPrefix(mount.Target, "/mnt") {
 			args = append(args, ";", "sudo", "chattr", "+i", "/", ";")
 		}
-		err := machine.CommonSSH(mc.SSH.RemoteUsername, mc.SSH.IdentityPath, mc.Name, mc.SSH.Port, args)
+		err := machine.LocalhostSSH(mc.SSH.RemoteUsername, mc.SSH.IdentityPath, mc.Name, mc.SSH.Port, args)
 		if err != nil {
 			return err
 		}
@@ -360,13 +362,13 @@ func (q *QEMUStubber) MountVolumesToVM(mc *vmconfigs.MachineConfig, quiet bool) 
 		// in other words we don't want to make people unnecessarily reprovision their machines
 		// to upgrade from 9p to virtiofs.
 		mountOptions := []string{"-t", "virtiofs"}
-		mountOptions = append(mountOptions, []string{mount.Tag, mount.Target}...)
+		mountOptions = append(mountOptions, []string{mount.Tag, strconv.Quote(mount.Target)}...)
 		mountFlags := fmt.Sprintf("context=\"%s\"", machine.NFSSELinuxContext)
 		if mount.ReadOnly {
 			mountFlags += ",ro"
 		}
 		mountOptions = append(mountOptions, "-o", mountFlags)
-		err = machine.CommonSSH(mc.SSH.RemoteUsername, mc.SSH.IdentityPath, mc.Name, mc.SSH.Port, append([]string{"sudo", "mount"}, mountOptions...))
+		err = machine.LocalhostSSH(mc.SSH.RemoteUsername, mc.SSH.IdentityPath, mc.Name, mc.SSH.Port, append([]string{"sudo", "mount"}, mountOptions...))
 		if err != nil {
 			return err
 		}
@@ -385,10 +387,6 @@ func (q *QEMUStubber) PostStartNetworking(mc *vmconfigs.MachineConfig, noInfo bo
 func (q *QEMUStubber) UpdateSSHPort(mc *vmconfigs.MachineConfig, port int) error {
 	// managed by gvproxy on this backend, so nothing to do
 	return nil
-}
-
-func (q *QEMUStubber) GetDisk(userInputPath string, dirs *define.MachineDirs, mc *vmconfigs.MachineConfig) error {
-	return diskpull.GetDisk(userInputPath, dirs, mc.ImagePath, q.VMType(), mc.Name)
 }
 
 func (q *QEMUStubber) GetRosetta(mc *vmconfigs.MachineConfig) (bool, error) {

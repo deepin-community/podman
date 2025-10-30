@@ -2,11 +2,11 @@ package tunnel
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
 
+	"github.com/containers/common/libimage/define"
 	"github.com/containers/image/v5/types"
 	"github.com/containers/podman/v5/pkg/bindings/images"
 	"github.com/containers/podman/v5/pkg/bindings/manifests"
@@ -34,7 +34,7 @@ func (ir *ImageEngine) ManifestExists(ctx context.Context, name string) (*entiti
 }
 
 // ManifestInspect returns contents of manifest list with given name
-func (ir *ImageEngine) ManifestInspect(ctx context.Context, name string, opts entities.ManifestInspectOptions) ([]byte, error) {
+func (ir *ImageEngine) ManifestInspect(ctx context.Context, name string, opts entities.ManifestInspectOptions) (*define.ManifestListData, error) {
 	options := new(manifests.InspectOptions).WithAuthfile(opts.Authfile)
 	if s := opts.SkipTLSVerify; s != types.OptionalBoolUndefined {
 		if s == types.OptionalBoolTrue {
@@ -49,11 +49,7 @@ func (ir *ImageEngine) ManifestInspect(ctx context.Context, name string, opts en
 		return nil, fmt.Errorf("getting content of manifest list or image %s: %w", name, err)
 	}
 
-	buf, err := json.MarshalIndent(list, "", "    ")
-	if err != nil {
-		return buf, fmt.Errorf("rendering manifest for display: %w", err)
-	}
-	return buf, err
+	return list, err
 }
 
 // ManifestAdd adds images to the manifest list
@@ -135,24 +131,41 @@ func (ir *ImageEngine) ManifestAnnotate(ctx context.Context, name, images string
 	options := new(manifests.ModifyOptions).WithArch(opts.Arch).WithVariant(opts.Variant)
 	options.WithFeatures(opts.Features).WithOS(opts.OS).WithOSVersion(opts.OSVersion)
 
-	if len(opts.Annotation) != 0 {
-		annotations := make(map[string]string)
-		for _, annotationSpec := range opts.Annotation {
-			key, val, hasVal := strings.Cut(annotationSpec, "=")
-			if !hasVal {
-				return "", fmt.Errorf("no value given for annotation %q", key)
-			}
-			annotations[key] = val
-		}
-		opts.Annotations = envLib.Join(opts.Annotations, annotations)
+	annotations, err := mergeAnnotations(opts.Annotations, opts.Annotation)
+	if err != nil {
+		return "", err
 	}
-	options.WithAnnotations(opts.Annotations)
+	options.WithAnnotations(annotations)
+
+	indexAnnotations, err := mergeAnnotations(opts.IndexAnnotations, opts.IndexAnnotation)
+	if err != nil {
+		return "", err
+	}
+	options.WithIndexAnnotations(indexAnnotations)
 
 	id, err := manifests.Annotate(ir.ClientCtx, name, []string{images}, options)
 	if err != nil {
 		return id, fmt.Errorf("annotating to manifest list %s: %w", name, err)
 	}
 	return id, nil
+}
+
+func mergeAnnotations(preferred map[string]string, aux []string) (map[string]string, error) {
+	if len(aux) != 0 {
+		auxAnnotations := make(map[string]string)
+		for _, annotationSpec := range aux {
+			key, val, hasVal := strings.Cut(annotationSpec, "=")
+			if !hasVal {
+				return nil, fmt.Errorf("no value given for annotation %q", key)
+			}
+			auxAnnotations[key] = val
+		}
+		if preferred == nil {
+			preferred = make(map[string]string)
+		}
+		preferred = envLib.Join(auxAnnotations, preferred)
+	}
+	return preferred, nil
 }
 
 // ManifestRemoveDigest removes the digest from manifest list
@@ -165,8 +178,8 @@ func (ir *ImageEngine) ManifestRemoveDigest(ctx context.Context, name string, im
 }
 
 // ManifestRm removes the specified manifest list from storage
-func (ir *ImageEngine) ManifestRm(ctx context.Context, names []string) (*entities.ImageRemoveReport, []error) {
-	return ir.Remove(ctx, names, entities.ImageRemoveOptions{LookupManifest: true})
+func (ir *ImageEngine) ManifestRm(ctx context.Context, names []string, opts entities.ImageRemoveOptions) (report *entities.ImageRemoveReport, rmErrors []error) {
+	return ir.Remove(ctx, names, entities.ImageRemoveOptions{LookupManifest: true, Ignore: opts.Ignore})
 }
 
 // ManifestPush pushes a manifest list or image index to the destination

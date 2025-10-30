@@ -18,6 +18,12 @@ const (
 	// the two supported boolean values (InspectResponseTrue and
 	// InspectResponseFalse) it will be used in the output of Inspect().
 	InspectAnnotationAutoremove = "io.podman.annotations.autoremove"
+	// InspectAnnotationAutoremoveImage is used by Inspect to identify
+	// containers which will automatically remove the image used by the
+	// container. If an annotation with this key is found in the OCI spec and
+	// is one of the two supported boolean values (InspectResponseTrue and
+	// InspectResponseFalse) it will be used in the output of Inspect().
+	InspectAnnotationAutoremoveImage = "io.podman.annotations.autoremove-image"
 	// InspectAnnotationPrivileged is used by Inspect to identify containers
 	// which are privileged (IE, running with elevated privileges).
 	// It is expected to be a boolean, populated by one of
@@ -162,6 +168,15 @@ const (
 
 	// KubeImageAutomountAnnotation
 	KubeImageAutomountAnnotation = "io.podman.annotations.kube.image.volumes.mount"
+
+	// PIDsLimitAnnotation is used to limit the number of PIDs
+	PIDsLimitAnnotation = "io.podman.annotations.pids-limit"
+
+	// CpusetAnnotation is used to restrict execution to specific CPU cores
+	CpusetAnnotation = "io.podman.annotations.cpuset"
+
+	// MemoryNodesAnnotation is used to restrict memory allocations to specific memory nodes on NUMA systems
+	MemoryNodesAnnotation = "io.podman.annotations.memory-nodes"
 
 	// TotalAnnotationSizeLimitB is the max length of annotations allowed by Kubernetes.
 	TotalAnnotationSizeLimitB int = 256 * (1 << 10) // 256 kB
