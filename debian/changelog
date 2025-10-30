@@ -1,8 +1,229 @@
-podman (5.2.5-1deepin1) unstable; urgency=medium
+podman (5.6.2+ds1-4) unstable; urgency=medium
 
-  * disable podman auto start service to systemd 
+  * Upload to unstable
 
- -- heysion <heysion@deepin.com>  Wed, 02 Jul 2025 10:07:30 +0800
+ -- Reinhard Tartler <siretart@tauware.de>  Sun, 26 Oct 2025 15:59:59 -0400
+
+podman (5.6.2+ds1-3+exp1) experimental; urgency=medium
+
+  * Compile against docker 27
+
+ -- Reinhard Tartler <siretart@tauware.de>  Mon, 20 Oct 2025 06:13:21 -0400
+
+podman (5.6.2+ds1-3) unstable; urgency=medium
+
+  * Fixup 0007-Allow-version-buildah from previous upload
+
+ -- Reinhard Tartler <siretart@tauware.de>  Mon, 06 Oct 2025 05:44:05 -0400
+
+podman (5.6.2+ds1-2) unstable; urgency=medium
+
+  * Allow version of buildah to be slightly off, avoids autopkgtest failures
+
+ -- Reinhard Tartler <siretart@tauware.de>  Sun, 05 Oct 2025 16:17:20 -0400
+
+podman (5.6.2+ds1-1) unstable; urgency=medium
+
+  * New upstream version: 5.6.2
+    - Fixed a bug where stopping the `podman machine start` command
+      with SIGPIPE could result in machine state being stuck as "Starting"
+    - Fixed a bug where `podman build` would fail with a permissions error
+      when building Containerfiles using a non-root user and cache mounts
+
+ -- Reinhard Tartler <siretart@tauware.de>  Sat, 04 Oct 2025 09:04:08 -0400
+
+podman (5.6.1+ds2-3) unstable; urgency=medium
+
+  * integration-tests-rootful: use $SUDO substitution to fix autopkgtest
+  * podman: remove libpod.conf, 87-podman-bridge.conflist on upgrade,
+    Closes: #1102908, #1115941
+  * Add a NEWS entry for breaking changes in version 5.0.0, Closes: #1115347
+
+ -- Reinhard Tartler <siretart@tauware.de>  Thu, 25 Sep 2025 05:46:01 -0400
+
+podman (5.6.1+ds2-2) unstable; urgency=medium
+
+  * Remove some unneeded maintainer scripts
+  * Silence lintian warnings regarding generated makefiles
+  * debian/control: Switch to Static-Built-Using
+  * system-tests: document as not needing forwarding
+  * remove source overrides, no longer needed
+  * debian/copyright: Remove uneeded expat,lgtp copyright entries
+
+ -- Reinhard Tartler <siretart@tauware.de>  Sun, 21 Sep 2025 19:02:14 -0400
+
+podman (5.6.1+ds2-1) unstable; urgency=medium
+
+  * Repack to exclude some unneded sources from upstream tarball:
+    - windows installer
+    - upstream test VM setup scripts
+  * integration-tests: increase keyring limits, fixes debci failures
+  * debian/NEWS: Fix parsing issues
+
+ -- Reinhard Tartler <siretart@tauware.de>  Sun, 21 Sep 2025 09:48:27 -0400
+
+podman (5.6.1+ds1-2) unstable; urgency=medium
+
+  * Rebuild against runc 1.3
+  * Avoid dependency on conmon runner config
+  * Upload to unstable
+
+ -- Reinhard Tartler <siretart@tauware.de>  Sat, 20 Sep 2025 21:38:16 -0400
+
+podman (5.6.1+ds1-1) experimental; urgency=medium
+
+  * New upstream version, Closes: 1114526, Fixes: CVE-2025-9566
+  * Major additions/rework to Revert-Newer-Docker26.patch
+  * Refresh Patches
+  * Bump Standards Version
+
+ -- Reinhard Tartler <siretart@tauware.de>  Wed, 10 Sep 2025 06:08:34 -0400
+
+podman (5.4.2+ds1-2) unstable; urgency=medium
+
+  * Team upload
+  * Apply fix for CVE-2025-6032 (Closes: #1108473)
+
+ -- Mathias Gibbens <gibmat@debian.org>  Tue, 08 Jul 2025 07:15:12 +0000
+
+podman (5.4.2+ds1-1) unstable; urgency=medium
+
+  * Drop patches no longer needed
+  * Fixed a bug where the `podman import` command could not import images
+    compressed with algorithms other than gzip
+
+ -- Reinhard Tartler <siretart@tauware.de>  Sat, 05 Apr 2025 17:48:53 -0400
+
+podman (5.4.1+ds1-3) unstable; urgency=medium
+
+  [ Faidon Liambotis ]
+  * Backport upstream PRs #25340 and #25350, adapting e2e tests for
+    compatibility with crun >= 1.21.
+
+ -- Reinhard Tartler <siretart@tauware.de>  Tue, 01 Apr 2025 14:23:52 -0400
+
+podman (5.4.1+ds1-2) unstable; urgency=medium
+
+  * disable the cni backend
+  * Fix possible deadlock in podman cp, Closes: #1101414
+  * Stop shipping obsolete libpod.conf
+
+ -- Reinhard Tartler <siretart@tauware.de>  Thu, 27 Mar 2025 10:06:13 -0400
+
+podman (5.4.1+ds1-1) unstable; urgency=medium
+
+  [Paul Holzinger]
+  * debian/rules: set "Build Origin" field to track distro origin
+
+  [Reinhard Tartler]
+  * New upstream release
+  * system-tests: re-enable tar tests, but ignore a basic timeout-related
+    test. Needs more investigation.
+  * No longer enable systemd system *and* user services, such as
+    podman.{service,socket}, podman-auto-update.timer,
+    podman-clean-transient.service, etc.  For rationale and background,
+    please refer to debian/NEWS, Closes: #1095048, 1095221, 1098808
+
+ -- Reinhard Tartler <siretart@tauware.de>  Thu, 20 Mar 2025 09:36:49 -0400
+
+podman (5.4.0+ds1-1) unstable; urgency=medium
+
+  * New upstream release
+  * Refresh patches, drop patches merged upstream
+  * Tighten build dependencies on containers/{storage,image,common,buildah}
+
+ -- Reinhard Tartler <siretart@tauware.de>  Sun, 16 Feb 2025 08:51:11 -0500
+
+podman (5.3.2+ds1-1) unstable; urgency=medium
+
+  * New upstream release
+  * debian/control: tighten dependencies
+    Build against build 1.38.1 which includes a TOCTOU fix: CVE-2024-11218
+  * Recommend criu and libcriu. This is required for podman snapshot features
+    to work.
+
+ -- Reinhard Tartler <siretart@tauware.de>  Mon, 27 Jan 2025 06:57:58 -0500
+
+podman (5.3.1+ds1-7) unstable; urgency=medium
+
+  * autopkgtest: Make sure that containers-storage is present
+  * Come up with better names for the integration tests
+  * Revise some integration test skips
+  * Drop tolerate-lchown.patch
+  * Drop the disable system_dial_stdio test
+
+ -- Reinhard Tartler <siretart@tauware.de>  Tue, 10 Dec 2024 13:44:53 -0500
+
+podman (5.3.1+ds1-6) unstable; urgency=medium
+
+  * localintegration tests: Rename helper variable to GINKGO_EXTRA_FLAGS
+  * integration-tests: Ignore os.Lchown failures
+
+ -- Reinhard Tartler <siretart@tauware.de>  Fri, 06 Dec 2024 08:13:07 -0500
+
+podman (5.3.1+ds1-5) unstable; urgency=medium
+
+  * Automatically retry flaky tests
+  * Pass BUILDTAGS with spaces instead of ','
+  * Add rootless integration tests
+
+ -- Reinhard Tartler <siretart@tauware.de>  Thu, 05 Dec 2024 09:46:34 -0500
+
+podman (5.3.1+ds1-4) unstable; urgency=medium
+
+  * autopkgtest/e2e: Bump total timeout 20m -> 90m
+  * Rename patches
+
+ -- Reinhard Tartler <siretart@tauware.de>  Mon, 02 Dec 2024 09:00:49 -0500
+
+podman (5.3.1+ds1-3) unstable; urgency=medium
+
+  * e2e integration tests: double the default timeout
+  * builtin-tests: Set buildtags to expand test coverage
+
+ -- Reinhard Tartler <siretart@tauware.de>  Sun, 01 Dec 2024 08:53:39 -0500
+
+podman (5.3.1+ds1-2) unstable; urgency=medium
+
+  * Remove a number of redundant build-dependencies
+  * autopkgtest:
+     - Restrict qemu tests to amd64
+     - Enable built-in tests
+     - Enable e2e tests
+     - Split out and expand patches for e2e tests
+  * Fix testdata installation
+
+ -- Reinhard Tartler <siretart@tauware.de>  Sat, 30 Nov 2024 17:49:45 -0500
+
+podman (5.3.1+ds1-1) unstable; urgency=medium
+
+  * new upstream release
+  * autopkgtest/builtin-tests: disable to workaround #1088235
+
+ -- Reinhard Tartler <siretart@tauware.de>  Mon, 25 Nov 2024 11:26:43 -0500
+
+podman (5.3.0+ds1-3) unstable; urgency=medium
+
+  * Update patches to disable shell completion system tests
+
+ -- Reinhard Tartler <siretart@tauware.de>  Sun, 17 Nov 2024 10:05:42 -0500
+
+podman (5.3.0+ds1-2) experimental; urgency=medium
+
+  * Merge in lost fixes to system tests from unstable
+
+ -- Reinhard Tartler <siretart@tauware.de>  Fri, 15 Nov 2024 11:51:57 -0500
+
+podman (5.3.0+ds1-1) experimental; urgency=medium
+
+  * New upstream release.
+  * Tighten build dependencies
+  * refresh patches
+  * build-depend on golang-github-kevinburke-ssh-config-dev
+  * Normalize fields with wrap-and-sort
+  * TestUnitDirs: Skip when CLONE_NEWUSER fails
+
+ -- Reinhard Tartler <siretart@tauware.de>  Thu, 14 Nov 2024 10:56:37 -0500
 
 podman (5.2.5-1) unstable; urgency=medium
 

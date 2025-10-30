@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -25,6 +26,7 @@ import (
 	"github.com/containers/podman/v5/cmd/podman/utils"
 	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/containers/podman/v5/pkg/env"
+	"github.com/openshift/imagebuilder"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
@@ -506,6 +508,14 @@ func buildFlagsWrapperToOptions(c *cobra.Command, contextDir string, flags *Buil
 		}
 	}
 
+	retryDelay := 2 * time.Second
+	if flags.RetryDelay != "" {
+		retryDelay, err = time.ParseDuration(flags.RetryDelay)
+		if err != nil {
+			return nil, fmt.Errorf("unable to parse value provided %q as --retry-delay: %w", flags.RetryDelay, err)
+		}
+	}
+
 	opts := buildahDefine.BuildOptions{
 		AddCapabilities:         flags.CapAdd,
 		AdditionalTags:          tags,
@@ -514,13 +524,12 @@ func buildFlagsWrapperToOptions(c *cobra.Command, contextDir string, flags *Buil
 		Annotations:             flags.Annotation,
 		Args:                    args,
 		BlobDirectory:           flags.BlobCache,
-		BuildOutput:             flags.BuildOutput,
+		BuildOutputs:            flags.BuildOutputs,
 		CacheFrom:               cacheFrom,
 		CacheTo:                 cacheTo,
 		CacheTTL:                cacheTTL,
 		ConfidentialWorkload:    confidentialWorkloadOptions,
 		CommonBuildOpts:         commonOpts,
-		CompatVolumes:           types.NewOptionalBool(flags.CompatVolumes),
 		Compression:             compression,
 		ConfigureNetwork:        networkPolicy,
 		ContextDirectory:        contextDir,
@@ -544,7 +553,7 @@ func buildFlagsWrapperToOptions(c *cobra.Command, contextDir string, flags *Buil
 		LogFile:                 flags.Logfile,
 		LogSplitByPlatform:      flags.LogSplitByPlatform,
 		Manifest:                flags.Manifest,
-		MaxPullPushRetries:      3,
+		MaxPullPushRetries:      flags.Retry,
 		NamespaceOptions:        nsValues,
 		NoCache:                 flags.NoCache,
 		OSFeatures:              flags.OSFeatures,
@@ -555,10 +564,11 @@ func buildFlagsWrapperToOptions(c *cobra.Command, contextDir string, flags *Buil
 		OutputFormat:            format,
 		Platforms:               platforms,
 		PullPolicy:              pullPolicy,
-		PullPushRetryDelay:      2 * time.Second,
+		PullPushRetryDelay:      retryDelay,
 		Quiet:                   flags.Quiet,
 		RemoveIntermediateCtrs:  flags.Rm,
 		ReportWriter:            reporter,
+		RewriteTimestamp:        flags.RewriteTimestamp,
 		Runtime:                 podmanConfig.RuntimePath,
 		RuntimeArgs:             runtimeFlags,
 		RusageLogFile:           flags.RusageLogFile,
@@ -570,20 +580,44 @@ func buildFlagsWrapperToOptions(c *cobra.Command, contextDir string, flags *Buil
 		TransientMounts:         flags.Volumes,
 		UnsetEnvs:               flags.UnsetEnvs,
 		UnsetLabels:             flags.UnsetLabels,
+		UnsetAnnotations:        flags.UnsetAnnotations,
+	}
+
+	if c.Flag("created-annotation").Changed {
+		opts.CreatedAnnotation = types.NewOptionalBool(flags.CreatedAnnotation)
+	}
+	if c.Flag("compat-volumes").Changed {
+		opts.CompatVolumes = types.NewOptionalBool(flags.CompatVolumes)
+	}
+	if c.Flag("inherit-labels").Changed {
+		opts.InheritLabels = types.NewOptionalBool(flags.InheritLabels)
+	}
+
+	if c.Flag("inherit-annotations").Changed {
+		opts.InheritAnnotations = types.NewOptionalBool(flags.InheritAnnotations)
 	}
 
 	if flags.IgnoreFile != "" {
-		excludes, err := parseDockerignore(flags.IgnoreFile)
+		excludes, err := imagebuilder.ParseIgnore(flags.IgnoreFile)
 		if err != nil {
-			return nil, fmt.Errorf("unable to obtain decrypt config: %w", err)
+			return nil, fmt.Errorf("unable to parse ignore file: %w", err)
 		}
 		opts.Excludes = excludes
 	}
 
+	if flags.SourceDateEpoch != "" { // could be explicitly specified, or passed via the environment, tricking .Changed()
+		sde, err := strconv.ParseInt(flags.SourceDateEpoch, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("parsing source-date-epoch value %q: %w", flags.SourceDateEpoch, err)
+		}
+		sourceDateEpoch := time.Unix(sde, 0).UTC()
+		opts.SourceDateEpoch = &sourceDateEpoch
+	}
 	if c.Flag("timestamp").Changed {
 		timestamp := time.Unix(flags.Timestamp, 0).UTC()
 		opts.Timestamp = &timestamp
 	}
+
 	if c.Flag("skip-unused-stages").Changed {
 		opts.SkipUnusedStages = types.NewOptionalBool(flags.SkipUnusedStages)
 	}
@@ -614,21 +648,6 @@ func getDecryptConfig(decryptionKeys []string) (*encconfig.DecryptConfig, error)
 	}
 
 	return decConfig, nil
-}
-
-func parseDockerignore(ignoreFile string) ([]string, error) {
-	excludes := []string{}
-	ignore, err := os.ReadFile(ignoreFile)
-	if err != nil {
-		return excludes, err
-	}
-	for _, e := range strings.Split(string(ignore), "\n") {
-		if len(e) == 0 || e[0] == '#' {
-			continue
-		}
-		excludes = append(excludes, e)
-	}
-	return excludes, nil
 }
 
 func areContainerfilesValid(contextDir string, containerFiles []string) error {

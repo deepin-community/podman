@@ -41,6 +41,7 @@ import (
 	"github.com/containers/podman/v5/pkg/annotations"
 	"github.com/containers/podman/v5/pkg/checkpoint/crutils"
 	"github.com/containers/podman/v5/pkg/criu"
+	libartTypes "github.com/containers/podman/v5/pkg/libartifact/types"
 	"github.com/containers/podman/v5/pkg/lookup"
 	"github.com/containers/podman/v5/pkg/rootless"
 	"github.com/containers/podman/v5/pkg/util"
@@ -177,6 +178,56 @@ func getOverlayUpperAndWorkDir(options []string) (string, string, error) {
 	return upperDir, workDir, nil
 }
 
+// Internal only function which creates the Rootfs for default internal
+// pause image and configures the Rootfs in the Container.
+func (c *Container) createInitRootfs() error {
+	tmpDir, err := c.runtime.TmpDir()
+	if err != nil {
+		return fmt.Errorf("getting runtime temporary directory: %w", err)
+	}
+	tmpDir = filepath.Join(tmpDir, "infra-container")
+	err = os.MkdirAll(tmpDir, 0755)
+	if err != nil {
+		return fmt.Errorf("creating infra container temporary directory: %w", err)
+	}
+
+	c.config.Rootfs = tmpDir
+	c.config.RootfsOverlay = true
+	return nil
+}
+
+// Internal only function which returns the mount-point for the /catatonit.
+// This mount-point should be added to the Container spec.
+func (c *Container) prepareCatatonitMount() (spec.Mount, error) {
+	newMount := spec.Mount{
+		Type:        define.TypeBind,
+		Source:      "",
+		Destination: "",
+		Options:     append(bindOptions, "ro", "nosuid", "nodev"),
+	}
+
+	// Also look into the path as some distributions install catatonit in
+	// /usr/bin.
+	catatonitPath, err := c.runtime.config.FindInitBinary()
+	if err != nil {
+		return newMount, fmt.Errorf("finding catatonit binary: %w", err)
+	}
+	catatonitPath, err = filepath.EvalSymlinks(catatonitPath)
+	if err != nil {
+		return newMount, fmt.Errorf("follow symlink to catatonit binary: %w", err)
+	}
+
+	newMount.Source = catatonitPath
+	newMount.Destination = "/" + filepath.Base(catatonitPath)
+
+	if len(c.config.Entrypoint) == 0 {
+		c.config.Entrypoint = []string{"/" + filepath.Base(catatonitPath), "-P"}
+		c.config.Spec.Process.Args = c.config.Entrypoint
+	}
+
+	return newMount, nil
+}
+
 // Generate spec for a container
 // Accepts a map of the container's dependencies
 func (c *Container) generateSpec(ctx context.Context) (s *spec.Spec, cleanupFuncRet func(), err error) {
@@ -194,15 +245,15 @@ func (c *Container) generateSpec(ctx context.Context) (s *spec.Spec, cleanupFunc
 			cleanupFunc()
 		}
 	}()
+
+	if err := c.makeBindMounts(); err != nil {
+		return nil, nil, err
+	}
+
 	overrides := c.getUserOverrides()
 	execUser, err := lookup.GetUserGroupInfo(c.state.Mountpoint, c.config.User, overrides)
 	if err != nil {
-		if slices.Contains(c.config.HostUsers, c.config.User) {
-			execUser, err = lookupHostUser(c.config.User)
-		}
-		if err != nil {
-			return nil, nil, err
-		}
+		return nil, nil, err
 	}
 
 	// NewFromSpec() is deprecated according to its comment
@@ -233,10 +284,6 @@ func (c *Container) generateSpec(ctx context.Context) (s *spec.Spec, cleanupFunc
 			return nil, nil, err
 		}
 		g.SetProcessApparmorProfile(updatedProfile)
-	}
-
-	if err := c.makeBindMounts(); err != nil {
-		return nil, nil, err
 	}
 
 	if err := c.mountNotifySocket(g); err != nil {
@@ -373,6 +420,8 @@ func (c *Container) generateSpec(ctx context.Context) (s *spec.Spec, cleanupFunc
 				// Podman decided for --no-dereference as many
 				// bin-utils tools (e..g, touch, chown, cp) do.
 				options = append(options, "copy-symlink")
+			case "copy", "nocopy":
+				// no real OCI runtime bind mount options, these should already be handled by the named volume mount above
 			default:
 				options = append(options, o)
 			}
@@ -382,6 +431,14 @@ func (c *Container) generateSpec(ctx context.Context) (s *spec.Spec, cleanupFunc
 
 	c.setProcessLabel(&g)
 	c.setMountLabel(&g)
+
+	if c.IsDefaultInfra() || c.IsService() {
+		newMount, err := c.prepareCatatonitMount()
+		if err != nil {
+			return nil, nil, err
+		}
+		g.AddMount(newMount)
+	}
 
 	// Add bind mounts to container
 	for dstPath, srcPath := range c.state.BindMounts {
@@ -481,6 +538,64 @@ func (c *Container) generateSpec(ctx context.Context) (s *spec.Spec, cleanupFunc
 			return nil, nil, fmt.Errorf("creating overlay mount for image %q failed: %w", volume.Source, err)
 		}
 		g.AddMount(overlayMount)
+	}
+
+	if len(c.config.ArtifactVolumes) > 0 {
+		artStore, err := c.runtime.ArtifactStore()
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, artifactMount := range c.config.ArtifactVolumes {
+			paths, err := artStore.BlobMountPaths(ctx, artifactMount.Source, &libartTypes.BlobMountPathOptions{
+				FilterBlobOptions: libartTypes.FilterBlobOptions{
+					Title:  artifactMount.Title,
+					Digest: artifactMount.Digest,
+				},
+			})
+			if err != nil {
+				return nil, nil, err
+			}
+
+			destIsFile, err := containerPathIsFile(c.state.Mountpoint, artifactMount.Dest)
+			// When the file does not exists and the artifact has only a single blob to mount
+			// assume it is a file so we use the dest path as direct mount.
+			if err != nil && len(paths) == 1 && errors.Is(err, fs.ErrNotExist) {
+				destIsFile = true
+			}
+			if destIsFile && len(paths) > 1 {
+				return nil, nil, fmt.Errorf("artifact %q contains more than one blob and container path %q is a file", artifactMount.Source, artifactMount.Dest)
+			}
+
+			for i, path := range paths {
+				var dest string
+				if destIsFile {
+					dest = artifactMount.Dest
+				} else {
+					var filename string
+					if artifactMount.Name != "" {
+						filename = artifactMount.Name
+						if len(paths) > 1 {
+							filename += "-" + strconv.Itoa(i)
+						}
+					} else {
+						filename = path.Name
+					}
+					dest = filepath.Join(artifactMount.Dest, filename)
+				}
+
+				logrus.Debugf("Mounting artifact %q in container %s, mount blob %q to %q", artifactMount.Source, c.ID(), path.SourcePath, dest)
+
+				g.AddMount(spec.Mount{
+					Destination: dest,
+					Source:      path.SourcePath,
+					Type:        define.TypeBind,
+					// Important: This must always be mounted read only here, we are using
+					// the source in the artifact store directly and because that is digest
+					// based a write will break the layout.
+					Options: []string{define.TypeBind, "ro"},
+				})
+			}
+		}
 	}
 
 	err = c.setHomeEnvIfNeeded()
@@ -592,6 +707,7 @@ func (c *Container) generateSpec(ctx context.Context) (s *spec.Spec, cleanupFunc
 	// Warning: CDI may alter g.Config in place.
 	if len(c.config.CDIDevices) > 0 {
 		registry, err := cdi.NewCache(
+			cdi.WithSpecDirs(c.runtime.config.Engine.CdiSpecDirs.Get()...),
 			cdi.WithAutoRefresh(false),
 		)
 		if err != nil {
@@ -662,7 +778,6 @@ func (c *Container) generateSpec(ctx context.Context) (s *spec.Spec, cleanupFunc
 	// setup rlimits
 	nofileSet := false
 	nprocSet := false
-	isRootless := rootless.IsRootless()
 	isRunningInUserNs := unshare.IsRootless()
 	if isRunningInUserNs && g.Config.Process != nil && g.Config.Process.OOMScoreAdj != nil {
 		var err error
@@ -671,18 +786,29 @@ func (c *Container) generateSpec(ctx context.Context) (s *spec.Spec, cleanupFunc
 			return nil, nil, err
 		}
 	}
-	if isRootless {
-		for _, rlimit := range c.config.Spec.Process.Rlimits {
-			if rlimit.Type == "RLIMIT_NOFILE" {
-				nofileSet = true
-			}
-			if rlimit.Type == "RLIMIT_NPROC" {
-				nprocSet = true
-			}
+	for _, rlimit := range c.config.Spec.Process.Rlimits {
+		if rlimit.Type == "RLIMIT_NOFILE" {
+			nofileSet = true
 		}
-		if !nofileSet {
-			max := rlimT(define.RLimitDefaultValue)
-			current := rlimT(define.RLimitDefaultValue)
+		if rlimit.Type == "RLIMIT_NPROC" {
+			nprocSet = true
+		}
+	}
+	needsClamping := false
+	if !nofileSet || !nprocSet {
+		needsClamping = isRunningInUserNs
+		if !needsClamping {
+			has, err := hasCapSysResource()
+			if err != nil {
+				return nil, nil, err
+			}
+			needsClamping = !has
+		}
+	}
+	if !nofileSet {
+		max := rlimT(define.RLimitDefaultValue)
+		current := rlimT(define.RLimitDefaultValue)
+		if needsClamping {
 			var rlimit unix.Rlimit
 			if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &rlimit); err != nil {
 				logrus.Warnf("Failed to return RLIMIT_NOFILE ulimit %q", err)
@@ -693,11 +819,13 @@ func (c *Container) generateSpec(ctx context.Context) (s *spec.Spec, cleanupFunc
 			if rlimT(rlimit.Max) < max {
 				max = rlimT(rlimit.Max)
 			}
-			g.AddProcessRlimits("RLIMIT_NOFILE", uint64(max), uint64(current))
 		}
-		if !nprocSet {
-			max := rlimT(define.RLimitDefaultValue)
-			current := rlimT(define.RLimitDefaultValue)
+		g.AddProcessRlimits("RLIMIT_NOFILE", uint64(max), uint64(current))
+	}
+	if !nprocSet {
+		max := rlimT(define.RLimitDefaultValue)
+		current := rlimT(define.RLimitDefaultValue)
+		if needsClamping {
 			var rlimit unix.Rlimit
 			if err := unix.Getrlimit(unix.RLIMIT_NPROC, &rlimit); err != nil {
 				logrus.Warnf("Failed to return RLIMIT_NPROC ulimit %q", err)
@@ -708,8 +836,8 @@ func (c *Container) generateSpec(ctx context.Context) (s *spec.Spec, cleanupFunc
 			if rlimT(rlimit.Max) < max {
 				max = rlimT(rlimit.Max)
 			}
-			g.AddProcessRlimits("RLIMIT_NPROC", uint64(max), uint64(current))
 		}
+		g.AddProcessRlimits("RLIMIT_NPROC", uint64(max), uint64(current))
 	}
 
 	c.addMaskedPaths(&g)
@@ -728,19 +856,16 @@ func (c *Container) isWorkDirSymlink(resolvedPath string) bool {
 	// If so, that's a valid use case: return nil.
 
 	maxSymLinks := 0
-	for {
-		// Linux only supports a chain of 40 links.
-		// Reference: https://github.com/torvalds/linux/blob/master/include/linux/namei.h#L13
-		if maxSymLinks > 40 {
-			break
-		}
+	// Linux only supports a chain of 40 links.
+	// Reference: https://github.com/torvalds/linux/blob/master/include/linux/namei.h#L13
+	for maxSymLinks <= 40 {
 		resolvedSymlink, err := os.Readlink(resolvedPath)
 		if err != nil {
 			// End sym-link resolution loop.
 			break
 		}
 		if resolvedSymlink != "" {
-			_, resolvedSymlinkWorkdir, err := c.resolvePath(c.state.Mountpoint, resolvedSymlink)
+			_, resolvedSymlinkWorkdir, _, err := c.resolvePath(c.state.Mountpoint, resolvedSymlink)
 			if isPathOnVolume(c, resolvedSymlinkWorkdir) || isPathOnMount(c, resolvedSymlinkWorkdir) {
 				// Resolved symlink exists on external volume or mount
 				return true
@@ -779,7 +904,7 @@ func (c *Container) resolveWorkDir() error {
 		return nil
 	}
 
-	_, resolvedWorkdir, err := c.resolvePath(c.state.Mountpoint, workdir)
+	_, resolvedWorkdir, _, err := c.resolvePath(c.state.Mountpoint, workdir)
 	if err != nil {
 		return err
 	}
@@ -795,25 +920,19 @@ func (c *Container) resolveWorkDir() error {
 	if !c.config.CreateWorkingDir {
 		// No need to create it (e.g., `--workdir=/foo`), so let's make sure
 		// the path exists on the container.
-		if err != nil {
-			if os.IsNotExist(err) {
-				// If resolved Workdir path gets marked as a valid symlink,
-				// return nil cause this is valid use-case.
-				if c.isWorkDirSymlink(resolvedWorkdir) {
-					return nil
-				}
-				return fmt.Errorf("workdir %q does not exist on container %s", workdir, c.ID())
+		if errors.Is(err, os.ErrNotExist) {
+			// If resolved Workdir path gets marked as a valid symlink,
+			// return nil cause this is valid use-case.
+			if c.isWorkDirSymlink(resolvedWorkdir) {
+				return nil
 			}
-			// This might be a serious error (e.g., permission), so
-			// we need to return the full error.
-			return fmt.Errorf("detecting workdir %q on container %s: %w", workdir, c.ID(), err)
+			return fmt.Errorf("workdir %q does not exist on container %s", workdir, c.ID())
 		}
-		return nil
+		// This might be a serious error (e.g., permission), so
+		// we need to return the full error.
+		return fmt.Errorf("detecting workdir %q on container %s: %w", workdir, c.ID(), err)
 	}
 	if err := os.MkdirAll(resolvedWorkdir, 0755); err != nil {
-		if os.IsExist(err) {
-			return nil
-		}
 		return fmt.Errorf("creating container %s workdir: %w", c.ID(), err)
 	}
 
@@ -1086,7 +1205,7 @@ func (c *Container) exportCheckpoint(options ContainerCheckpointOptions) error {
 			return fmt.Errorf("exporting root file-system diff for %q: %w", c.ID(), err)
 		}
 
-		addToTarFiles, err := crutils.CRCreateRootFsDiffTar(&rootFsChanges, c.state.Mountpoint, c.bundlePath())
+		addToTarFiles, err = crutils.CRCreateRootFsDiffTar(&rootFsChanges, c.state.Mountpoint, c.bundlePath())
 		if err != nil {
 			return err
 		}
@@ -2072,7 +2191,7 @@ rootless=%d
 		}
 	}
 
-	return c.makePlatformBindMounts()
+	return c.makeHostnameBindMount()
 }
 
 // createResolvConf create the resolv.conf file and bind mount it
@@ -2139,21 +2258,26 @@ func (c *Container) addResolvConf() error {
 		if len(networkNameServers) == 0 || networkBackend != string(types.Netavark) {
 			keepHostServers = true
 		}
-		// first add the nameservers from the networks status
-		nameservers = networkNameServers
-
-		// pasta and slirp4netns have a built in DNS forwarder.
-		nameservers = c.addSpecialDNS(nameservers)
+		if len(networkNameServers) > 0 {
+			// add the nameservers from the networks status
+			nameservers = networkNameServers
+		} else {
+			// pasta and slirp4netns have a built in DNS forwarder.
+			nameservers = c.addSpecialDNS(nameservers)
+		}
 	}
 
 	// Set DNS search domains
-	search := networkSearchDomains
-
+	var search []string
+	keepHostSearches := false
 	if len(c.config.DNSSearch) > 0 || len(c.runtime.config.Containers.DNSSearches.Get()) > 0 {
 		customSearch := make([]string, 0, len(c.config.DNSSearch)+len(c.runtime.config.Containers.DNSSearches.Get()))
 		customSearch = append(customSearch, c.runtime.config.Containers.DNSSearches.Get()...)
 		customSearch = append(customSearch, c.config.DNSSearch...)
 		search = customSearch
+	} else {
+		search = networkSearchDomains
+		keepHostSearches = true
 	}
 
 	options := make([]string, 0, len(c.config.DNSOption)+len(c.runtime.config.Containers.DNSOptions.Get()))
@@ -2166,13 +2290,14 @@ func (c *Container) addResolvConf() error {
 	}
 
 	if err := resolvconf.New(&resolvconf.Params{
-		IPv6Enabled:     ipv6,
-		KeepHostServers: keepHostServers,
-		Nameservers:     nameservers,
-		Namespaces:      namespaces,
-		Options:         options,
-		Path:            destPath,
-		Searches:        search,
+		IPv6Enabled:      ipv6,
+		KeepHostServers:  keepHostServers,
+		KeepHostSearches: keepHostSearches,
+		Nameservers:      nameservers,
+		Namespaces:       namespaces,
+		Options:          options,
+		Path:             destPath,
+		Searches:         search,
 	}); err != nil {
 		return fmt.Errorf("building resolv.conf for container %s: %w", c.ID(), err)
 	}
@@ -2306,26 +2431,42 @@ func (c *Container) addHosts() error {
 	}
 
 	var exclude []net.IP
+	var preferIP string
 	if c.pastaResult != nil {
 		exclude = c.pastaResult.IPAddresses
+		if len(c.pastaResult.MapGuestAddrIPs) > 0 {
+			// we used --map-guest-addr to setup pasta so prefer this address
+			preferIP = c.pastaResult.MapGuestAddrIPs[0]
+		}
 	} else if c.config.NetMode.IsBridge() {
 		// When running rootless we have to check the rootless netns ip addresses
 		// to not assign a ip that is already used in the rootless netns as it would
 		// not be routed to the host.
 		// https://github.com/containers/podman/issues/22653
 		info, err := c.runtime.network.RootlessNetnsInfo()
-		if err == nil {
+		if err == nil && info != nil {
 			exclude = info.IPAddresses
+			if len(info.MapGuestIps) > 0 {
+				// we used --map-guest-addr to setup pasta so prefer this address
+				preferIP = info.MapGuestIps[0]
+			}
 		}
 	}
 
+	hostContainersInternalIP := etchosts.GetHostContainersInternalIP(etchosts.HostContainersInternalOptions{
+		Conf:             c.runtime.config,
+		NetStatus:        c.state.NetworkStatus,
+		NetworkInterface: c.runtime.network,
+		Exclude:          exclude,
+		PreferIP:         preferIP,
+	})
+
 	return etchosts.New(&etchosts.Params{
-		BaseFile:     baseHostFile,
-		ExtraHosts:   c.config.HostAdd,
-		ContainerIPs: containerIPsEntries,
-		HostContainersInternalIP: etchosts.GetHostContainersInternalIPExcluding(
-			c.runtime.config, c.state.NetworkStatus, c.runtime.network, exclude),
-		TargetFile: targetFile,
+		BaseFile:                 baseHostFile,
+		ExtraHosts:               c.config.HostAdd,
+		ContainerIPs:             containerIPsEntries,
+		HostContainersInternalIP: hostContainersInternalIP,
+		TargetFile:               targetFile,
 	})
 }
 
@@ -2359,7 +2500,7 @@ func (c *Container) generateGroupEntry() (string, error) {
 
 	// Things we *can't* handle: adding the user we added in
 	// generatePasswdEntry to any *existing* groups.
-	addedGID := 0
+	addedGID := -1
 	if c.config.AddCurrentUserPasswdEntry {
 		entry, gid, err := c.generateCurrentUserGroupEntry()
 		if err != nil {
@@ -2428,7 +2569,7 @@ func (c *Container) generateUserGroupEntry(addedGID int) (string, error) {
 	}
 
 	splitUser := strings.SplitN(c.config.User, ":", 2)
-	group := splitUser[0]
+	group := "0"
 	if len(splitUser) > 1 {
 		group = splitUser[1]
 	}
@@ -2438,7 +2579,7 @@ func (c *Container) generateUserGroupEntry(addedGID int) (string, error) {
 		return "", nil //nolint: nilerr
 	}
 
-	if addedGID != 0 && addedGID == int(gid) {
+	if addedGID != -1 && addedGID == int(gid) {
 		return "", nil
 	}
 
@@ -2872,6 +3013,10 @@ func (c *Container) fixVolumePermissions(v *ContainerNamedVolume) error {
 	vol.lock.Lock()
 	defer vol.lock.Unlock()
 
+	return c.fixVolumePermissionsUnlocked(v, vol)
+}
+
+func (c *Container) fixVolumePermissionsUnlocked(v *ContainerNamedVolume, vol *Volume) error {
 	// The volume may need a copy-up. Check the state.
 	if err := vol.update(); err != nil {
 		return err
@@ -2944,7 +3089,11 @@ func (c *Container) fixVolumePermissions(v *ContainerNamedVolume) error {
 			return nil
 		}
 
-		st, err := os.Lstat(filepath.Join(c.state.Mountpoint, v.Dest))
+		finalPath, err := securejoin.SecureJoin(c.state.Mountpoint, v.Dest)
+		if err != nil {
+			return err
+		}
+		st, err := os.Lstat(finalPath)
 		if err == nil {
 			if stat, ok := st.Sys().(*syscall.Stat_t); ok {
 				uid, gid := int(stat.Uid), int(stat.Gid)
@@ -2996,7 +3145,7 @@ func (c *Container) relabel(src, mountLabel string, shared bool) error {
 	}
 	// only relabel on initial creation of container
 	if !c.ensureState(define.ContainerStateConfigured, define.ContainerStateUnknown) {
-		label, err := label.FileLabel(src)
+		label, err := selinux.FileLabel(src)
 		if err != nil {
 			return err
 		}

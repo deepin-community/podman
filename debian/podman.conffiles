@@ -1,0 +1,2 @@
+remove-on-upgrade /etc/containers/libpod.conf
+remove-on-upgrade /etc/cni/net.d/87-podman-bridge.conflist

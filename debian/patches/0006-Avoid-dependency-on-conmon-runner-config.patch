@@ -1,0 +1,30 @@
+From: Reinhard Tartler <siretart@tauware.de>
+Date: Thu, 18 Sep 2025 12:21:10 -0400
+Subject: Avoid dependency on conmon runner config
+
+Forwarded: not-needed
+---
+ libpod/oci_conmon_common.go | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/libpod/oci_conmon_common.go b/libpod/oci_conmon_common.go
+index 02fecd2..b30b8a3 100644
+--- a/libpod/oci_conmon_common.go
++++ b/libpod/oci_conmon_common.go
+@@ -25,7 +25,6 @@ import (
+ 	"github.com/containers/common/pkg/detach"
+ 	"github.com/containers/common/pkg/resize"
+ 	"github.com/containers/common/pkg/version"
+-	conmonConfig "github.com/containers/conmon/runner/config"
+ 	"github.com/containers/podman/v5/libpod/define"
+ 	"github.com/containers/podman/v5/libpod/logs"
+ 	"github.com/containers/podman/v5/pkg/checkpoint/crutils"
+@@ -45,7 +44,7 @@ const (
+ 	// directly from the Go code, so const it here
+ 	// Important: The conmon attach socket uses an extra byte at the beginning of each
+ 	// message to specify the STREAM so we have to increase the buffer size by one
+-	bufferSize = conmonConfig.BufSize + 1
++	bufferSize = 8192 + 1
+ )
+ 
+ // ConmonOCIRuntime is an OCI runtime managed by Conmon.

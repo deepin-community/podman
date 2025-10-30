@@ -1,0 +1,503 @@
+From: Reinhard Tartler <siretart@tauware.de>
+Date: Mon, 20 Oct 2025 05:59:46 -0400
+Subject: Revert "fix deprecated docker v28 types"
+
+This reverts commit f2606c42302b845d68f65e65c2931cbaa8762f81.
+---
+ cmd/podman/pods/create.go              |  2 +-
+ pkg/api/handlers/compat/containers.go  | 84 +++++++++++++---------------------
+ pkg/api/handlers/compat/images.go      | 10 ++--
+ pkg/api/handlers/compat/images_push.go |  2 -
+ pkg/api/handlers/compat/system.go      |  5 +-
+ pkg/api/handlers/swagger/responses.go  |  4 +-
+ pkg/api/handlers/types.go              |  2 +-
+ pkg/api/handlers/utils/images.go       |  3 --
+ pkg/bindings/containers/commit.go      |  8 ++--
+ pkg/bindings/containers/exec.go        |  4 +-
+ pkg/bindings/manifests/manifests.go    |  3 +-
+ pkg/domain/entities/types.go           |  4 +-
+ pkg/domain/entities/types/types.go     |  8 ----
+ 13 files changed, 55 insertions(+), 84 deletions(-)
+
+diff --git a/cmd/podman/pods/create.go b/cmd/podman/pods/create.go
+index b0ef3f1..719fc4f 100644
+--- a/cmd/podman/pods/create.go
++++ b/cmd/podman/pods/create.go
+@@ -21,7 +21,7 @@ import (
+ 	"github.com/containers/podman/v5/pkg/specgen"
+ 	"github.com/containers/podman/v5/pkg/specgenutil"
+ 	"github.com/containers/podman/v5/pkg/util"
+-	"github.com/containers/storage/pkg/parsers"
++	"github.com/docker/docker/pkg/parsers"
+ 	"github.com/sirupsen/logrus"
+ 	"github.com/spf13/cobra"
+ )
+diff --git a/pkg/api/handlers/compat/containers.go b/pkg/api/handlers/compat/containers.go
+index 596248e..a6582a9 100644
+--- a/pkg/api/handlers/compat/containers.go
++++ b/pkg/api/handlers/compat/containers.go
+@@ -24,10 +24,10 @@ import (
+ 	"github.com/containers/podman/v5/pkg/ps"
+ 	"github.com/containers/podman/v5/pkg/signal"
+ 	"github.com/containers/podman/v5/pkg/util"
++	"github.com/docker/docker/api/types"
+ 	dockerBackend "github.com/docker/docker/api/types/backend"
+ 	"github.com/docker/docker/api/types/container"
+ 	"github.com/docker/docker/api/types/network"
+-	"github.com/docker/docker/api/types/storage"
+ 	"github.com/docker/go-connections/nat"
+ 	"github.com/docker/go-units"
+ 	spec "github.com/opencontainers/runtime-spec/specs-go"
+@@ -342,51 +342,30 @@ func LibpodToContainer(l *libpod.Container, sz bool) (*handlers.Container, error
+ 		}
+ 	}
+ 
+-	inspect, err := l.Inspect(false)
++	portMappings, err := l.PortMappings()
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 
+-	ports := []container.Port{}
+-	for portKey, bindings := range inspect.NetworkSettings.Ports {
+-		portNum, proto, ok := strings.Cut(portKey, "/")
+-		if !ok {
+-			return nil, fmt.Errorf("PORT/PROTOCOL format required for %q", portKey)
+-		}
+-
+-		containerPort, err := strconv.Atoi(portNum)
+-		if err != nil {
+-			return nil, err
+-		}
+-
+-		if len(bindings) == 0 {
+-			// Exposed but not published
+-			ports = append(ports, container.Port{
+-				PrivatePort: uint16(containerPort),
+-				Type:        proto,
+-			})
+-		} else {
+-			for _, b := range bindings {
+-				hostPortInt, err := strconv.Atoi(b.HostPort)
+-				if err != nil {
+-					return nil, fmt.Errorf("invalid HostPort: %v", err)
+-				}
+-
+-				ports = append(ports, container.Port{
+-					IP:          b.HostIP,
+-					PrivatePort: uint16(containerPort),
+-					PublicPort:  uint16(hostPortInt),
+-					Type:        proto,
+-				})
+-			}
++	ports := make([]types.Port, len(portMappings))
++	for idx, portMapping := range portMappings {
++		ports[idx] = types.Port{
++			IP:          portMapping.HostIP,
++			PrivatePort: portMapping.ContainerPort,
++			PublicPort:  portMapping.HostPort,
++			Type:        portMapping.Protocol,
+ 		}
+ 	}
++	inspect, err := l.Inspect(false)
++	if err != nil {
++		return nil, err
++	}
+ 
+ 	n, err := json.Marshal(inspect.NetworkSettings)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	networkSettings := container.NetworkSettingsSummary{}
++	networkSettings := types.SummaryNetworkSettings{}
+ 	if err := json.Unmarshal(n, &networkSettings); err != nil {
+ 		return nil, err
+ 	}
+@@ -395,13 +374,13 @@ func LibpodToContainer(l *libpod.Container, sz bool) (*handlers.Container, error
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	mounts := []container.MountPoint{}
++	mounts := []types.MountPoint{}
+ 	if err := json.Unmarshal(m, &mounts); err != nil {
+ 		return nil, err
+ 	}
+ 
+ 	return &handlers.Container{
+-		Container: container.Summary{
++		Container: types.Container{
+ 			ID:         l.ID(),
+ 			Names:      []string{fmt.Sprintf("/%s", l.Name())},
+ 			Image:      imageName,
+@@ -429,7 +408,7 @@ func LibpodToContainer(l *libpod.Container, sz bool) (*handlers.Container, error
+ 	}, nil
+ }
+ 
+-func convertSecondaryIPPrefixLen(input *define.InspectNetworkSettings, output *container.NetworkSettings) {
++func convertSecondaryIPPrefixLen(input *define.InspectNetworkSettings, output *types.NetworkSettings) {
+ 	for index, ip := range input.SecondaryIPAddresses {
+ 		output.SecondaryIPAddresses[index].PrefixLen = ip.PrefixLength
+ 	}
+@@ -438,7 +417,7 @@ func convertSecondaryIPPrefixLen(input *define.InspectNetworkSettings, output *c
+ 	}
+ }
+ 
+-func LibpodToContainerJSON(l *libpod.Container, sz bool) (*container.InspectResponse, error) {
++func LibpodToContainerJSON(l *libpod.Container, sz bool) (*types.ContainerJSON, error) {
+ 	imageID, imageName := l.Image()
+ 	inspect, err := l.Inspect(sz)
+ 	if err != nil {
+@@ -453,7 +432,7 @@ func LibpodToContainerJSON(l *libpod.Container, sz bool) (*container.InspectResp
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	state := container.State{}
++	state := types.ContainerState{}
+ 	if err := json.Unmarshal(i, &state); err != nil {
+ 		return nil, err
+ 	}
+@@ -480,14 +459,14 @@ func LibpodToContainerJSON(l *libpod.Container, sz bool) (*container.InspectResp
+ 	}
+ 
+ 	if l.HasHealthCheck() && state.Status != "created" {
+-		state.Health = &container.Health{}
++		state.Health = &types.Health{}
+ 		if inspect.State.Health != nil {
+ 			state.Health.Status = inspect.State.Health.Status
+ 			state.Health.FailingStreak = inspect.State.Health.FailingStreak
+ 			log := inspect.State.Health.Log
+ 
+ 			for _, item := range log {
+-				res := &container.HealthcheckResult{}
++				res := &types.HealthcheckResult{}
+ 				s, err := time.Parse(time.RFC3339Nano, item.Start)
+ 				if err != nil {
+ 					return nil, err
+@@ -530,13 +509,16 @@ func LibpodToContainerJSON(l *libpod.Container, sz bool) (*container.InspectResp
+ 	if hc.LogConfig.Type == define.KubernetesLogging {
+ 		hc.LogConfig.Type = define.JSONLogging
+ 	}
+-
+-	graphDriver := storage.DriverData{
+-		Name: inspect.GraphDriver.Name,
+-		Data: inspect.GraphDriver.Data,
++	g, err := json.Marshal(inspect.GraphDriver)
++	if err != nil {
++		return nil, err
++	}
++	graphDriver := types.GraphDriverData{}
++	if err := json.Unmarshal(g, &graphDriver); err != nil {
++		return nil, err
+ 	}
+ 
+-	cb := container.ContainerJSONBase{
++	cb := types.ContainerJSONBase{
+ 		ID:              l.ID(),
+ 		Created:         l.CreatedTime().UTC().Format(time.RFC3339Nano), // Docker uses UTC
+ 		Path:            inspect.Path,
+@@ -624,7 +606,7 @@ func LibpodToContainerJSON(l *libpod.Container, sz bool) (*container.InspectResp
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	mounts := []container.MountPoint{}
++	mounts := []types.MountPoint{}
+ 	if err := json.Unmarshal(m, &mounts); err != nil {
+ 		return nil, err
+ 	}
+@@ -643,7 +625,7 @@ func LibpodToContainerJSON(l *libpod.Container, sz bool) (*container.InspectResp
+ 		return nil, err
+ 	}
+ 
+-	networkSettings := container.NetworkSettings{}
++	networkSettings := types.NetworkSettings{}
+ 	if err := json.Unmarshal(n, &networkSettings); err != nil {
+ 		return nil, err
+ 	}
+@@ -655,7 +637,7 @@ func LibpodToContainerJSON(l *libpod.Container, sz bool) (*container.InspectResp
+ 		networkSettings.Networks = map[string]*network.EndpointSettings{}
+ 	}
+ 
+-	c := container.InspectResponse{
++	c := types.ContainerJSON{
+ 		ContainerJSONBase: &cb,
+ 		Mounts:            mounts,
+ 		Config:            &config,
+@@ -834,6 +816,6 @@ func UpdateContainer(w http.ResponseWriter, r *http.Request) {
+ 		return
+ 	}
+ 
+-	responseStruct := container.UpdateResponse{}
++	responseStruct := container.ContainerUpdateOKBody{}
+ 	utils.WriteResponse(w, http.StatusOK, responseStruct)
+ }
+diff --git a/pkg/api/handlers/compat/images.go b/pkg/api/handlers/compat/images.go
+index fc98870..520aae3 100644
+--- a/pkg/api/handlers/compat/images.go
++++ b/pkg/api/handlers/compat/images.go
+@@ -26,9 +26,9 @@ import (
+ 	"github.com/containers/podman/v5/pkg/domain/infra/abi"
+ 	"github.com/containers/podman/v5/pkg/util"
+ 	"github.com/containers/storage"
++	docker "github.com/docker/docker/api/types"
+ 	dockerContainer "github.com/docker/docker/api/types/container"
+ 	dockerImage "github.com/docker/docker/api/types/image"
+-	dockerStorage "github.com/docker/docker/api/types/storage"
+ 	"github.com/docker/go-connections/nat"
+ 	"github.com/opencontainers/go-digest"
+ 	"github.com/sirupsen/logrus"
+@@ -372,7 +372,7 @@ func imageDataToImageInspect(ctx context.Context, l *libimage.Image, r *http.Req
+ 		StopSignal:   info.Config.StopSignal,
+ 	}
+ 
+-	rootfs := dockerImage.RootFS{}
++	rootfs := docker.RootFS{}
+ 	if info.RootFS != nil {
+ 		rootfs.Type = info.RootFS.Type
+ 		rootfs.Layers = make([]string, 0, len(info.RootFS.Layers))
+@@ -381,7 +381,7 @@ func imageDataToImageInspect(ctx context.Context, l *libimage.Image, r *http.Req
+ 		}
+ 	}
+ 
+-	graphDriver := dockerStorage.DriverData{
++	graphDriver := docker.GraphDriverData{
+ 		Name: info.GraphDriver.Name,
+ 		Data: info.GraphDriver.Data,
+ 	}
+@@ -390,7 +390,7 @@ func imageDataToImageInspect(ctx context.Context, l *libimage.Image, r *http.Req
+ 	cc.Hostname = info.ID[0:11] // short ID is the hostname
+ 	cc.Volumes = info.Config.Volumes
+ 
+-	dockerImageInspect := dockerImage.InspectResponse{
++	dockerImageInspect := docker.ImageInspect{
+ 		Architecture:    info.Architecture,
+ 		Author:          info.Author,
+ 		Comment:         info.Comment,
+@@ -416,7 +416,7 @@ func imageDataToImageInspect(ctx context.Context, l *libimage.Image, r *http.Req
+ 		dockerImageInspect.VirtualSize = info.VirtualSize
+ 	}
+ 
+-	return &handlers.ImageInspect{InspectResponse: dockerImageInspect}, nil
++	return &handlers.ImageInspect{ImageInspect: dockerImageInspect}, nil
+ }
+ 
+ // portsToPortSet converts libpod's exposed ports to docker's structs
+diff --git a/pkg/api/handlers/compat/images_push.go b/pkg/api/handlers/compat/images_push.go
+index bf0ab63..319dc98 100644
+--- a/pkg/api/handlers/compat/images_push.go
++++ b/pkg/api/handlers/compat/images_push.go
+@@ -165,7 +165,6 @@ loop: // break out of for/select infinite loop
+ 					Current: int64(e.Offset),
+ 					Total:   e.Artifact.Size,
+ 				}
+-				//nolint:staticcheck // Deprecated field, but because consumers might still read it keep it.
+ 				report.ProgressMessage = report.Progress.String()
+ 			case types.ProgressEventSkipped:
+ 				report.Status = "Layer already exists"
+@@ -191,7 +190,6 @@ loop: // break out of for/select infinite loop
+ 				report.Error = &jsonmessage.JSONError{
+ 					Message: msg,
+ 				}
+-				//nolint:staticcheck // Deprecated field, but because consumers might still read it keep it.
+ 				report.ErrorMessage = msg
+ 				if err := enc.Encode(report); err != nil {
+ 					logrus.Warnf("Failed to json encode error %q", err.Error())
+diff --git a/pkg/api/handlers/compat/system.go b/pkg/api/handlers/compat/system.go
+index 2688d8d..e776928 100644
+--- a/pkg/api/handlers/compat/system.go
++++ b/pkg/api/handlers/compat/system.go
+@@ -14,7 +14,6 @@ import (
+ 	"github.com/containers/podman/v5/pkg/domain/entities"
+ 	"github.com/containers/podman/v5/pkg/domain/infra/abi"
+ 	docker "github.com/docker/docker/api/types"
+-	"github.com/docker/docker/api/types/container"
+ 	dockerImage "github.com/docker/docker/api/types/image"
+ 	"github.com/docker/docker/api/types/volume"
+ )
+@@ -50,9 +49,9 @@ func GetDiskUsage(w http.ResponseWriter, r *http.Request) {
+ 		imgs[i] = &t
+ 	}
+ 
+-	ctnrs := make([]*container.Summary, len(df.Containers))
++	ctnrs := make([]*docker.Container, len(df.Containers))
+ 	for i, o := range df.Containers {
+-		t := container.Summary{
++		t := docker.Container{
+ 			ID:         o.ContainerID,
+ 			Names:      []string{o.Names},
+ 			Image:      o.Image,
+diff --git a/pkg/api/handlers/swagger/responses.go b/pkg/api/handlers/swagger/responses.go
+index cd4804f..3c08849 100644
+--- a/pkg/api/handlers/swagger/responses.go
++++ b/pkg/api/handlers/swagger/responses.go
+@@ -11,7 +11,7 @@ import (
+ 	"github.com/containers/podman/v5/pkg/domain/entities"
+ 	"github.com/containers/podman/v5/pkg/domain/entities/reports"
+ 	"github.com/containers/podman/v5/pkg/inspect"
+-	"github.com/docker/docker/api/types/container"
++	dockerAPI "github.com/docker/docker/api/types"
+ 	dockerImage "github.com/docker/docker/api/types/image"
+ 	"github.com/docker/docker/api/types/network"
+ 	"github.com/docker/docker/api/types/volume"
+@@ -125,7 +125,7 @@ type inspectImageResponseLibpod struct {
+ // swagger:response
+ type containerInspectResponse struct {
+ 	// in:body
+-	Body container.InspectResponse
++	Body dockerAPI.ContainerJSON
+ }
+ 
+ // List processes in container
+diff --git a/pkg/api/handlers/types.go b/pkg/api/handlers/types.go
+index 2d85470..d1d2422 100644
+--- a/pkg/api/handlers/types.go
++++ b/pkg/api/handlers/types.go
+@@ -19,7 +19,7 @@ type AuthConfig struct {
+ }
+ 
+ type ImageInspect struct {
+-	dockerImage.InspectResponse
++	docker.ImageInspect
+ 	// Container is for backwards compat but is basically unused
+ 	Container string
+ }
+diff --git a/pkg/api/handlers/utils/images.go b/pkg/api/handlers/utils/images.go
+index 00e7eac..a53fa59 100644
+--- a/pkg/api/handlers/utils/images.go
++++ b/pkg/api/handlers/utils/images.go
+@@ -169,7 +169,6 @@ loop: // break out of for/select infinite loop
+ 				report.Status = "Downloading"
+ 				report.Progress.Current = int64(e.Offset)
+ 				report.Progress.Total = e.Artifact.Size
+-				//nolint:staticcheck // Deprecated field, but because consumers might still read it keep it.
+ 				report.ProgressMessage = report.Progress.String()
+ 			case types.ProgressEventSkipped:
+ 				report.Status = "Already exists"
+@@ -194,7 +193,6 @@ loop: // break out of for/select infinite loop
+ 				report.Error = &jsonmessage.JSONError{
+ 					Message: msg,
+ 				}
+-				//nolint:staticcheck // Deprecated field, but because consumers might still read it keep it.
+ 				report.ErrorMessage = msg
+ 			} else {
+ 				pulledImages := pullRes.images
+@@ -207,7 +205,6 @@ loop: // break out of for/select infinite loop
+ 					report.Error = &jsonmessage.JSONError{
+ 						Message: msg,
+ 					}
+-					//nolint:staticcheck // Deprecated field, but because consumers might still read it keep it.
+ 					report.ErrorMessage = msg
+ 					writeStatusCode(http.StatusInternalServerError)
+ 				}
+diff --git a/pkg/bindings/containers/commit.go b/pkg/bindings/containers/commit.go
+index 2d4489d..76b22d1 100644
+--- a/pkg/bindings/containers/commit.go
++++ b/pkg/bindings/containers/commit.go
+@@ -11,26 +11,26 @@ import (
+ 
+ 	"github.com/containers/podman/v5/pkg/bindings"
+ 	"github.com/containers/podman/v5/pkg/bindings/images"
+-	"github.com/containers/podman/v5/pkg/domain/entities/types"
+ 	"github.com/containers/storage/pkg/regexp"
++	dockerAPI "github.com/docker/docker/api/types"
+ )
+ 
+ var iidRegex = regexp.Delayed(`^[0-9a-f]{12}`)
+ 
+ // Commit creates a container image from a container.  The container is defined by nameOrID.  Use
+ // the CommitOptions for finer grain control on characteristics of the resulting image.
+-func Commit(ctx context.Context, nameOrID string, options *CommitOptions) (types.IDResponse, error) {
++func Commit(ctx context.Context, nameOrID string, options *CommitOptions) (dockerAPI.IDResponse, error) {
+ 	if options == nil {
+ 		options = new(CommitOptions)
+ 	}
+-	id := types.IDResponse{}
++	id := dockerAPI.IDResponse{}
+ 	conn, err := bindings.GetClient(ctx)
+ 	if err != nil {
+ 		return id, err
+ 	}
+ 	params, err := options.ToParams()
+ 	if err != nil {
+-		return types.IDResponse{}, err
++		return dockerAPI.IDResponse{}, err
+ 	}
+ 	params.Set("container", nameOrID)
+ 	var requestBody io.Reader
+diff --git a/pkg/bindings/containers/exec.go b/pkg/bindings/containers/exec.go
+index a8419e3..e471a58 100644
+--- a/pkg/bindings/containers/exec.go
++++ b/pkg/bindings/containers/exec.go
+@@ -11,7 +11,7 @@ import (
+ 	"github.com/containers/podman/v5/libpod/define"
+ 	"github.com/containers/podman/v5/pkg/api/handlers"
+ 	"github.com/containers/podman/v5/pkg/bindings"
+-	"github.com/containers/podman/v5/pkg/domain/entities/types"
++	dockerAPI "github.com/docker/docker/api/types"
+ 	jsoniter "github.com/json-iterator/go"
+ 	"github.com/sirupsen/logrus"
+ )
+@@ -43,7 +43,7 @@ func ExecCreate(ctx context.Context, nameOrID string, config *handlers.ExecCreat
+ 	}
+ 	defer resp.Body.Close()
+ 
+-	respStruct := new(types.IDResponse)
++	respStruct := new(dockerAPI.IDResponse)
+ 	if err := resp.Process(respStruct); err != nil {
+ 		return "", err
+ 	}
+diff --git a/pkg/bindings/manifests/manifests.go b/pkg/bindings/manifests/manifests.go
+index 48720cb..e8d6856 100644
+--- a/pkg/bindings/manifests/manifests.go
++++ b/pkg/bindings/manifests/manifests.go
+@@ -24,6 +24,7 @@ import (
+ 	"github.com/containers/podman/v5/pkg/bindings/images"
+ 	entitiesTypes "github.com/containers/podman/v5/pkg/domain/entities/types"
+ 	"github.com/containers/podman/v5/pkg/errorhandling"
++	dockerAPI "github.com/docker/docker/api/types"
+ 	jsoniter "github.com/json-iterator/go"
+ )
+ 
+@@ -32,7 +33,7 @@ import (
+ // of a list if the name provided is a manifest list.  The ID of the new manifest list
+ // is returned as a string.
+ func Create(ctx context.Context, name string, images []string, options *CreateOptions) (string, error) {
+-	var idr entitiesTypes.IDResponse
++	var idr dockerAPI.IDResponse
+ 	if options == nil {
+ 		options = new(CreateOptions)
+ 	}
+diff --git a/pkg/domain/entities/types.go b/pkg/domain/entities/types.go
+index 1c1d78a..72873d0 100644
+--- a/pkg/domain/entities/types.go
++++ b/pkg/domain/entities/types.go
+@@ -9,6 +9,7 @@ import (
+ 	entitiesTypes "github.com/containers/podman/v5/pkg/domain/entities/types"
+ 	"github.com/containers/podman/v5/pkg/specgen"
+ 	"github.com/containers/storage/pkg/archive"
++	dockerAPI "github.com/docker/docker/api/types"
+ )
+ 
+ type Report struct {
+@@ -108,4 +109,5 @@ type IDOrNameResponse struct {
+ 	IDOrName string
+ }
+ 
+-type IDResponse = entitiesTypes.IDResponse
++// swagger:model
++type IDResponse dockerAPI.IDResponse
+diff --git a/pkg/domain/entities/types/types.go b/pkg/domain/entities/types/types.go
+index ccb60e4..6530402 100644
+--- a/pkg/domain/entities/types/types.go
++++ b/pkg/domain/entities/types/types.go
+@@ -77,11 +77,3 @@ type BuildReport struct {
+ 	// Format to save the image in
+ 	SaveFormat string
+ }
+-
+-// swagger:model
+-type IDResponse struct {
+-
+-	// The id of the newly created object.
+-	// Required: true
+-	ID string `json:"Id"`
+-}

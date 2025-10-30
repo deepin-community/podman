@@ -8,11 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/containers/buildah"
@@ -29,20 +31,37 @@ import (
 	"github.com/containers/podman/v5/pkg/rootless"
 	"github.com/containers/podman/v5/pkg/util"
 	"github.com/containers/storage/pkg/archive"
+	"github.com/containers/storage/pkg/chrootarchive"
 	"github.com/containers/storage/pkg/fileutils"
 	"github.com/docker/docker/pkg/jsonmessage"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
 )
 
+func genSpaceErr(err error) error {
+	if errors.Is(err, syscall.ENOSPC) {
+		return fmt.Errorf("context directory may be too large: %w", err)
+	}
+	return err
+}
+
 func BuildImage(w http.ResponseWriter, r *http.Request) {
+	multipart := false
 	if hdr, found := r.Header["Content-Type"]; found && len(hdr) > 0 {
-		contentType := hdr[0]
+		contentType, _, err := mime.ParseMediaType(hdr[0])
+		if err != nil {
+			utils.BadRequest(w, "Content-Type", hdr[0], fmt.Errorf("failed to parse content type: %w", err))
+			return
+		}
+
 		switch contentType {
 		case "application/tar":
 			logrus.Infof("tar file content type is  %s, should use \"application/x-tar\" content type", contentType)
 		case "application/x-tar":
 			break
+		case "multipart/form-data":
+			logrus.Infof("Received %s", hdr[0])
+			multipart = true
 		default:
 			if utils.IsLibpodRequest(r) {
 				utils.BadRequest(w, "Content-Type", hdr[0],
@@ -73,100 +92,121 @@ func BuildImage(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	contextDirectory, err := extractTarFile(anchorDir, r)
+	contextDirectory, additionalBuildContexts, err := handleBuildContexts(anchorDir, r, multipart)
+	if err != nil {
+		utils.InternalServerError(w, genSpaceErr(err))
+		return
+	}
+
+	runtime := r.Context().Value(api.RuntimeKey).(*libpod.Runtime)
+	conf, err := runtime.GetConfigNoCopy()
 	if err != nil {
 		utils.InternalServerError(w, err)
 		return
 	}
 
 	query := struct {
-		AddHosts                string   `schema:"extrahosts"`
-		AdditionalCapabilities  string   `schema:"addcaps"`
-		AdditionalBuildContexts string   `schema:"additionalbuildcontexts"`
-		AllPlatforms            bool     `schema:"allplatforms"`
-		Annotations             string   `schema:"annotations"`
-		AppArmor                string   `schema:"apparmor"`
-		BuildArgs               string   `schema:"buildargs"`
-		CacheFrom               string   `schema:"cachefrom"`
-		CacheTo                 string   `schema:"cacheto"`
-		CacheTTL                string   `schema:"cachettl"`
-		CgroupParent            string   `schema:"cgroupparent"`
-		CompatVolumes           bool     `schema:"compatvolumes"`
-		Compression             uint64   `schema:"compression"`
-		ConfigureNetwork        string   `schema:"networkmode"`
-		CPPFlags                string   `schema:"cppflags"`
-		CpuPeriod               uint64   `schema:"cpuperiod"`  //nolint:revive,stylecheck
-		CpuQuota                int64    `schema:"cpuquota"`   //nolint:revive,stylecheck
-		CpuSetCpus              string   `schema:"cpusetcpus"` //nolint:revive,stylecheck
-		CpuSetMems              string   `schema:"cpusetmems"` //nolint:revive,stylecheck
-		CpuShares               uint64   `schema:"cpushares"`  //nolint:revive,stylecheck
-		DNSOptions              string   `schema:"dnsoptions"`
-		DNSSearch               string   `schema:"dnssearch"`
-		DNSServers              string   `schema:"dnsservers"`
-		Devices                 string   `schema:"devices"`
-		Dockerfile              string   `schema:"dockerfile"`
-		DropCapabilities        string   `schema:"dropcaps"`
-		Envs                    []string `schema:"setenv"`
-		Excludes                string   `schema:"excludes"`
-		ForceRm                 bool     `schema:"forcerm"`
-		From                    string   `schema:"from"`
-		GroupAdd                []string `schema:"groupadd"`
-		HTTPProxy               bool     `schema:"httpproxy"`
-		IDMappingOptions        string   `schema:"idmappingoptions"`
-		IdentityLabel           bool     `schema:"identitylabel"`
-		Ignore                  bool     `schema:"ignore"`
-		Isolation               string   `schema:"isolation"`
-		Jobs                    int      `schema:"jobs"`
-		LabelOpts               string   `schema:"labelopts"`
-		Labels                  string   `schema:"labels"`
-		LayerLabels             []string `schema:"layerLabel"`
-		Layers                  bool     `schema:"layers"`
-		LogRusage               bool     `schema:"rusage"`
-		Manifest                string   `schema:"manifest"`
-		MemSwap                 int64    `schema:"memswap"`
-		Memory                  int64    `schema:"memory"`
-		NamespaceOptions        string   `schema:"nsoptions"`
-		NoCache                 bool     `schema:"nocache"`
-		OmitHistory             bool     `schema:"omithistory"`
-		OSFeatures              []string `schema:"osfeature"`
-		OSVersion               string   `schema:"osversion"`
-		OutputFormat            string   `schema:"outputformat"`
-		Platform                []string `schema:"platform"`
-		Pull                    bool     `schema:"pull"`
-		PullPolicy              string   `schema:"pullpolicy"`
-		Quiet                   bool     `schema:"q"`
-		Registry                string   `schema:"registry"`
-		Rm                      bool     `schema:"rm"`
-		RusageLogFile           string   `schema:"rusagelogfile"`
-		Remote                  string   `schema:"remote"`
-		Seccomp                 string   `schema:"seccomp"`
-		Secrets                 string   `schema:"secrets"`
-		SecurityOpt             string   `schema:"securityopt"`
-		ShmSize                 int      `schema:"shmsize"`
-		SkipUnusedStages        bool     `schema:"skipunusedstages"`
-		Squash                  bool     `schema:"squash"`
-		TLSVerify               bool     `schema:"tlsVerify"`
-		Tags                    []string `schema:"t"`
-		Target                  string   `schema:"target"`
-		Timestamp               int64    `schema:"timestamp"`
-		Ulimits                 string   `schema:"ulimits"`
-		UnsetEnvs               []string `schema:"unsetenv"`
-		UnsetLabels             []string `schema:"unsetlabel"`
-		Volumes                 []string `schema:"volume"`
+		AddHosts                string             `schema:"extrahosts"`
+		AdditionalCapabilities  string             `schema:"addcaps"`
+		AdditionalBuildContexts string             `schema:"additionalbuildcontexts"`
+		AllPlatforms            bool               `schema:"allplatforms"`
+		Annotations             string             `schema:"annotations"`
+		AppArmor                string             `schema:"apparmor"`
+		BuildArgs               string             `schema:"buildargs"`
+		CacheFrom               string             `schema:"cachefrom"`
+		CacheTo                 string             `schema:"cacheto"`
+		CacheTTL                string             `schema:"cachettl"`
+		CgroupParent            string             `schema:"cgroupparent"`
+		CompatVolumes           bool               `schema:"compatvolumes"`
+		Compression             uint64             `schema:"compression"`
+		ConfigureNetwork        string             `schema:"networkmode"`
+		CPPFlags                string             `schema:"cppflags"`
+		CpuPeriod               uint64             `schema:"cpuperiod"`
+		CpuQuota                int64              `schema:"cpuquota"`
+		CpuSetCpus              string             `schema:"cpusetcpus"`
+		CpuSetMems              string             `schema:"cpusetmems"`
+		CpuShares               uint64             `schema:"cpushares"`
+		CreatedAnnotation       types.OptionalBool `schema:"createdannotation"`
+		DNSOptions              string             `schema:"dnsoptions"`
+		DNSSearch               string             `schema:"dnssearch"`
+		DNSServers              string             `schema:"dnsservers"`
+		Devices                 string             `schema:"devices"`
+		Dockerfile              string             `schema:"dockerfile"`
+		DropCapabilities        string             `schema:"dropcaps"`
+		Envs                    []string           `schema:"setenv"`
+		Excludes                string             `schema:"excludes"`
+		ForceRm                 bool               `schema:"forcerm"`
+		From                    string             `schema:"from"`
+		GroupAdd                []string           `schema:"groupadd"`
+		HTTPProxy               bool               `schema:"httpproxy"`
+		IDMappingOptions        string             `schema:"idmappingoptions"`
+		IdentityLabel           bool               `schema:"identitylabel"`
+		Ignore                  bool               `schema:"ignore"`
+		InheritLabels           types.OptionalBool `schema:"inheritlabels"`
+		InheritAnnotations      types.OptionalBool `schema:"inheritannotations"`
+		Isolation               string             `schema:"isolation"`
+		Jobs                    int                `schema:"jobs"`
+		LabelOpts               string             `schema:"labelopts"`
+		Labels                  string             `schema:"labels"`
+		LayerLabels             []string           `schema:"layerLabel"`
+		Layers                  bool               `schema:"layers"`
+		LogRusage               bool               `schema:"rusage"`
+		Manifest                string             `schema:"manifest"`
+		MemSwap                 int64              `schema:"memswap"`
+		Memory                  int64              `schema:"memory"`
+		NamespaceOptions        string             `schema:"nsoptions"`
+		NoCache                 bool               `schema:"nocache"`
+		NoHosts                 bool               `schema:"nohosts"`
+		OmitHistory             bool               `schema:"omithistory"`
+		OSFeatures              []string           `schema:"osfeature"`
+		OSVersion               string             `schema:"osversion"`
+		OutputFormat            string             `schema:"outputformat"`
+		Platform                []string           `schema:"platform"`
+		Pull                    bool               `schema:"pull"`
+		PullPolicy              string             `schema:"pullpolicy"`
+		Quiet                   bool               `schema:"q"`
+		Registry                string             `schema:"registry"`
+		Rm                      bool               `schema:"rm"`
+		RusageLogFile           string             `schema:"rusagelogfile"`
+		Remote                  string             `schema:"remote"`
+		RewriteTimestamp        bool               `schema:"rewritetimestamp"`
+		Retry                   int                `schema:"retry"`
+		RetryDelay              string             `schema:"retry-delay"`
+		Seccomp                 string             `schema:"seccomp"`
+		Secrets                 string             `schema:"secrets"`
+		SecurityOpt             string             `schema:"securityopt"`
+		ShmSize                 int                `schema:"shmsize"`
+		SkipUnusedStages        bool               `schema:"skipunusedstages"`
+		SourceDateEpoch         int64              `schema:"sourcedateepoch"`
+		Squash                  bool               `schema:"squash"`
+		TLSVerify               bool               `schema:"tlsVerify"`
+		Tags                    []string           `schema:"t"`
+		Target                  string             `schema:"target"`
+		Timestamp               int64              `schema:"timestamp"`
+		Ulimits                 string             `schema:"ulimits"`
+		UnsetEnvs               []string           `schema:"unsetenv"`
+		UnsetLabels             []string           `schema:"unsetlabel"`
+		UnsetAnnotations        []string           `schema:"unsetannotation"`
+		Volumes                 []string           `schema:"volume"`
 	}{
-		Dockerfile:       "Dockerfile",
-		IdentityLabel:    true,
-		Registry:         "docker.io",
-		Rm:               true,
-		ShmSize:          64 * 1024 * 1024,
-		TLSVerify:        true,
-		SkipUnusedStages: true,
+		Dockerfile: "Dockerfile",
+		Registry:   "docker.io",
+		Rm:         true,
+		ShmSize:    64 * 1024 * 1024,
+		TLSVerify:  true,
+		Retry:      int(conf.Engine.Retry),
+		RetryDelay: conf.Engine.RetryDelay,
 	}
 
 	decoder := utils.GetDecoder(r)
 	if err := decoder.Decode(&query, r.URL.Query()); err != nil {
 		utils.Error(w, http.StatusBadRequest, err)
 		return
+	}
+
+	var identityLabel types.OptionalBool
+	if _, found := r.URL.Query()["identitylabel"]; found {
+		identityLabel = types.NewOptionalBool(query.IdentityLabel)
 	}
 
 	// if layers field not set assume its not from a valid podman-client
@@ -205,7 +245,7 @@ func BuildImage(w http.ResponseWriter, r *http.Request) {
 		}
 		tempDir, subDir, err := buildahDefine.TempDirForURL(anchorDir, "buildah", query.Remote)
 		if err != nil {
-			utils.InternalServerError(w, err)
+			utils.InternalServerError(w, genSpaceErr(err))
 			return
 		}
 		if tempDir != "" {
@@ -238,7 +278,7 @@ func BuildImage(w http.ResponseWriter, r *http.Request) {
 
 			for _, containerfile := range m {
 				// Add path to containerfile iff it is not URL
-				if !(strings.HasPrefix(containerfile, "http://") || strings.HasPrefix(containerfile, "https://")) {
+				if !strings.HasPrefix(containerfile, "http://") && !strings.HasPrefix(containerfile, "https://") {
 					containerfile = filepath.Join(contextDirectory,
 						filepath.Clean(filepath.FromSlash(containerfile)))
 				}
@@ -271,6 +311,11 @@ func BuildImage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	compression := archive.Compression(query.Compression)
+
+	var compatVolumes types.OptionalBool
+	if _, found := r.URL.Query()["compatvolumes"]; found {
+		compatVolumes = types.NewOptionalBool(query.CompatVolumes)
+	}
 
 	// convert dropcaps formats
 	var dropCaps = []string{}
@@ -417,14 +462,6 @@ func BuildImage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		additionalTags = append(additionalTags, possiblyNormalizedTag)
-	}
-
-	var additionalBuildContexts = map[string]*buildahDefine.AdditionalBuildContext{}
-	if _, found := r.URL.Query()["additionalbuildcontexts"]; found {
-		if err := json.Unmarshal([]byte(query.AdditionalBuildContexts), &additionalBuildContexts); err != nil {
-			utils.BadRequest(w, "additionalbuildcontexts", query.AdditionalBuildContexts, err)
-			return
-		}
 	}
 
 	var idMappingOptions buildahDefine.IDMappingOptions
@@ -635,7 +672,15 @@ func BuildImage(w http.ResponseWriter, r *http.Request) {
 		AuthFilePath:     authfile,
 		DockerAuthConfig: creds,
 	}
-	utils.PossiblyEnforceDockerHub(r, systemContext)
+	if err := utils.PossiblyEnforceDockerHub(r, systemContext); err != nil {
+		utils.Error(w, http.StatusInternalServerError, fmt.Errorf("checking to enforce DockerHub: %w", err))
+		return
+	}
+
+	var skipUnusedStages types.OptionalBool
+	if _, found := r.URL.Query()["skipunusedstages"]; found {
+		skipUnusedStages = types.NewOptionalBool(query.SkipUnusedStages)
+	}
 
 	if _, found := r.URL.Query()["tlsVerify"]; found {
 		systemContext.DockerInsecureSkipTLSVerify = types.NewOptionalBool(!query.TLSVerify)
@@ -661,7 +706,18 @@ func BuildImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	runtime := r.Context().Value(api.RuntimeKey).(*libpod.Runtime)
+	retryDelay := 2 * time.Second
+	if query.RetryDelay != "" {
+		retryDelay, err = time.ParseDuration(query.RetryDelay)
+		if err != nil {
+			utils.BadRequest(w, "retry-delay", query.RetryDelay, err)
+			return
+		}
+	}
+
+	// Note: avoid using types.NewOptionaBool() to initialize optional bool fields of this
+	// struct without checking if the client supplied a value.  Skipping that step prevents
+	// the builder from choosing/using its defaults.
 	buildOptions := buildahDefine.BuildOptions{
 		AddCapabilities:         addCaps,
 		AdditionalBuildContexts: additionalBuildContexts,
@@ -686,10 +742,11 @@ func BuildImage(w http.ResponseWriter, r *http.Request) {
 			DNSSearch:          dnssearch,
 			DNSServers:         dnsservers,
 			HTTPProxy:          query.HTTPProxy,
-			IdentityLabel:      types.NewOptionalBool(query.IdentityLabel),
+			IdentityLabel:      identityLabel,
 			LabelOpts:          labelOpts,
 			Memory:             query.Memory,
 			MemorySwap:         query.MemSwap,
+			NoHosts:            query.NoHosts,
 			OmitHistory:        query.OmitHistory,
 			SeccompProfilePath: seccomp,
 			ShmSize:            strconv.Itoa(query.ShmSize),
@@ -697,7 +754,8 @@ func BuildImage(w http.ResponseWriter, r *http.Request) {
 			Secrets:            secrets,
 			Volumes:            query.Volumes,
 		},
-		CompatVolumes:                  types.NewOptionalBool(query.CompatVolumes),
+		CompatVolumes:                  compatVolumes,
+		CreatedAnnotation:              query.CreatedAnnotation,
 		Compression:                    compression,
 		ConfigureNetwork:               parseNetworkConfigurationPolicy(query.ConfigureNetwork),
 		ContextDirectory:               contextDirectory,
@@ -712,6 +770,8 @@ func BuildImage(w http.ResponseWriter, r *http.Request) {
 		IDMappingOptions:               &idMappingOptions,
 		IgnoreUnrecognizedInstructions: query.Ignore,
 		IgnoreFile:                     ignoreFile,
+		InheritLabels:                  query.InheritLabels,
+		InheritAnnotations:             query.InheritAnnotations,
 		Isolation:                      isolation,
 		Jobs:                           &jobs,
 		Labels:                         labels,
@@ -719,7 +779,7 @@ func BuildImage(w http.ResponseWriter, r *http.Request) {
 		Layers:                         query.Layers,
 		LogRusage:                      query.LogRusage,
 		Manifest:                       query.Manifest,
-		MaxPullPushRetries:             3,
+		MaxPullPushRetries:             query.Retry,
 		NamespaceOptions:               nsoptions,
 		NoCache:                        query.NoCache,
 		OSFeatures:                     query.OSFeatures,
@@ -728,23 +788,25 @@ func BuildImage(w http.ResponseWriter, r *http.Request) {
 		Output:                         output,
 		OutputFormat:                   format,
 		PullPolicy:                     pullPolicy,
-		PullPushRetryDelay:             2 * time.Second,
+		PullPushRetryDelay:             retryDelay,
 		Quiet:                          query.Quiet,
 		Registry:                       registry,
 		RemoveIntermediateCtrs:         query.Rm,
 		ReportWriter:                   reporter,
+		RewriteTimestamp:               query.RewriteTimestamp,
 		RusageLogFile:                  query.RusageLogFile,
-		SkipUnusedStages:               types.NewOptionalBool(query.SkipUnusedStages),
+		SkipUnusedStages:               skipUnusedStages,
 		Squash:                         query.Squash,
 		SystemContext:                  systemContext,
 		Target:                         query.Target,
 		UnsetEnvs:                      query.UnsetEnvs,
 		UnsetLabels:                    query.UnsetLabels,
+		UnsetAnnotations:               query.UnsetAnnotations,
 	}
 
 	platforms := query.Platform
 	if len(platforms) == 1 {
-		// Docker API uses comma sperated platform arg so match this here
+		// Docker API uses comma separated platform arg so match this here
 		platforms = strings.Split(query.Platform[0], ",")
 	}
 	for _, platformSpec := range platforms {
@@ -758,6 +820,10 @@ func BuildImage(w http.ResponseWriter, r *http.Request) {
 			Arch:    arch,
 			Variant: variant,
 		})
+	}
+	if _, found := r.URL.Query()["sourcedateepoch"]; found {
+		ts := time.Unix(query.SourceDateEpoch, 0)
+		buildOptions.SourceDateEpoch = &ts
 	}
 	if _, found := r.URL.Query()["timestamp"]; found {
 		ts := time.Unix(query.Timestamp, 0)
@@ -886,6 +952,149 @@ func BuildImage(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func handleBuildContexts(anchorDir string, r *http.Request, multipart bool) (contextDir string, additionalContexts map[string]*buildahDefine.AdditionalBuildContext, err error) {
+	additionalContexts = make(map[string]*buildahDefine.AdditionalBuildContext)
+	query := r.URL.Query()
+
+	for _, url := range query["additionalbuildcontexts"] {
+		name, value, found := strings.Cut(url, "=")
+		if !found {
+			return "", nil, fmt.Errorf("invalid additional build context format: %q", url)
+		}
+
+		logrus.Debugf("name: %q, context: %q", name, value)
+
+		switch {
+		case strings.HasPrefix(value, "url:"):
+			value = strings.TrimPrefix(value, "url:")
+			tempDir, subdir, err := buildahDefine.TempDirForURL(anchorDir, "buildah", value)
+			if err != nil {
+				return "", nil, fmt.Errorf("downloading URL %q: %w", name, err)
+			}
+
+			contextPath := filepath.Join(tempDir, subdir)
+			additionalContexts[name] = &buildahDefine.AdditionalBuildContext{
+				IsURL:           true,
+				IsImage:         false,
+				Value:           contextPath,
+				DownloadedCache: contextPath,
+			}
+
+			logrus.Debugf("Downloaded URL context %q to %q", name, contextPath)
+		case strings.HasPrefix(value, "image:"):
+			value = strings.TrimPrefix(value, "image:")
+			additionalContexts[name] = &buildahDefine.AdditionalBuildContext{
+				IsURL:   false,
+				IsImage: true,
+				Value:   value,
+			}
+
+			logrus.Debugf("Using image context %q: %q", name, value)
+		}
+	}
+
+	// If we have a multipart we use the operations, if not default extraction for main context
+	if multipart {
+		logrus.Debug("Multipart is needed")
+		reader, err := r.MultipartReader()
+		if err != nil {
+			return "", nil, fmt.Errorf("failed to create multipart reader: %w", err)
+		}
+
+		for {
+			part, err := reader.NextPart()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return "", nil, fmt.Errorf("failed to read multipart: %w", err)
+			}
+
+			fieldName := part.FormName()
+
+			switch {
+			case fieldName == "MainContext":
+				mainDir, err := extractTarFile(anchorDir, part)
+				if err != nil {
+					part.Close()
+					return "", nil, fmt.Errorf("extracting main context in multipart: %w", err)
+				}
+				if mainDir == "" {
+					part.Close()
+					return "", nil, fmt.Errorf("main context directory is empty")
+				}
+				contextDir = mainDir
+				part.Close()
+
+			case strings.HasPrefix(fieldName, "build-context-"):
+				contextName := strings.TrimPrefix(fieldName, "build-context-")
+
+				// Create temp directory directly under anchorDir
+				additionalAnchor, err := os.MkdirTemp(anchorDir, contextName+"-*")
+				if err != nil {
+					part.Close()
+					return "", nil, fmt.Errorf("creating temp directory for additional context %q: %w", contextName, err)
+				}
+
+				if err := chrootarchive.Untar(part, additionalAnchor, nil); err != nil {
+					part.Close()
+					return "", nil, fmt.Errorf("extracting additional context %q: %w", contextName, err)
+				}
+
+				var latestModTime time.Time
+				fileCount := 0
+				walkErr := filepath.Walk(additionalAnchor, func(path string, info os.FileInfo, err error) error {
+					if err != nil {
+						return err
+					}
+					// Skip the root directory itself since it's always going to have the latest timestamp
+					if path == additionalAnchor {
+						return nil
+					}
+					if !info.IsDir() {
+						fileCount++
+					}
+					// Use any extracted content timestamp (files or subdirectories)
+					if info.ModTime().After(latestModTime) {
+						latestModTime = info.ModTime()
+					}
+					return nil
+				})
+				if walkErr != nil {
+					part.Close()
+					return "", nil, fmt.Errorf("error walking additional context: %w", walkErr)
+				}
+
+				// If we found any files, set the timestamp on the additional context directory
+				// to the latest modified time found in the files.
+				if !latestModTime.IsZero() {
+					if err := os.Chtimes(additionalAnchor, latestModTime, latestModTime); err != nil {
+						logrus.Warnf("Failed to set timestamp on additional context directory: %v", err)
+					}
+				}
+
+				additionalContexts[contextName] = &buildahDefine.AdditionalBuildContext{
+					IsURL:   false,
+					IsImage: false,
+					Value:   additionalAnchor,
+				}
+				part.Close()
+			default:
+				logrus.Debugf("Ignoring unknown multipart field: %s", fieldName)
+				part.Close()
+			}
+		}
+	} else {
+		logrus.Debug("No multipart needed")
+		contextDir, err = extractTarFile(anchorDir, r.Body)
+		if err != nil {
+			return "", nil, err
+		}
+	}
+
+	return contextDir, additionalContexts, nil
+}
+
 func parseNetworkConfigurationPolicy(network string) buildah.NetworkConfigurationPolicy {
 	if val, err := strconv.Atoi(network); err == nil {
 		return buildah.NetworkConfigurationPolicy(val)
@@ -909,13 +1118,13 @@ func parseLibPodIsolation(isolation string) (buildah.Isolation, error) {
 	return parse.IsolationOption(isolation)
 }
 
-func extractTarFile(anchorDir string, r *http.Request) (string, error) {
+func extractTarFile(anchorDir string, r io.ReadCloser) (string, error) {
 	buildDir := filepath.Join(anchorDir, "build")
 	err := os.Mkdir(buildDir, 0o700)
 	if err != nil {
 		return "", err
 	}
 
-	err = archive.Untar(r.Body, buildDir, nil)
+	err = archive.Untar(r, buildDir, nil)
 	return buildDir, err
 }

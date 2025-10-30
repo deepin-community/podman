@@ -120,18 +120,10 @@ func WriteJSON(w http.ResponseWriter, code int, value interface{}) {
 	w.WriteHeader(code)
 
 	coder := json.NewEncoder(w)
-	coder.SetEscapeHTML(true)
+	coder.SetEscapeHTML(false)
 	if err := coder.Encode(value); err != nil {
 		logrus.Errorf("Unable to write json: %q", err)
 	}
-}
-
-func FilterMapToString(filters map[string][]string) (string, error) {
-	f, err := json.Marshal(filters)
-	if err != nil {
-		return "", err
-	}
-	return string(f), nil
 }
 
 func GetVar(r *http.Request, k string) string {

@@ -2,23 +2,19 @@
 #
 # tests for podman system df
 #
+# DO NOT PARALLELIZE. All of these tests require complete control of images.
+#
 
 load helpers
 
-function setup() {
-    # Depending on which tests have been run prior to getting here, there
-    # may be one or two images loaded. We want only '$IMAGE', not the
-    # systemd one.
-    run_podman rmi -f $SYSTEMD_IMAGE
-
-    basic_setup
-}
-
-function teardown() {
-    basic_teardown
-
-    # In case the active-volumes test failed: clean up stray volumes
+function setup_file() {
+    # Pristine setup: no pods, containers, volumes, images
+    run_podman pod rm -a -f
+    run_podman rm -f -a -t0
     run_podman volume rm -a
+    run_podman image rm -f -a
+
+    _prefetch $IMAGE
 }
 
 @test "podman system df - basic functionality" {
@@ -38,17 +34,37 @@ function teardown() {
     is "$output" '.*"Local Volumes".*"Size":"0B"' "Total containers reported"
 }
 
+# Regression test for https://github.com/containers/podman/issues/26224
+@test "podman system df - with rootfs container" {
+    pod=p-$(safename)
+    # create a pod which creates an infra container based on a rootfs
+    run_podman pod create --name $pod
+
+    run_podman system df
+    assert "${lines[1]}"  =~ "Images *1 *0.*"
+    assert "${lines[2]}"  =~ "Containers *1 *0.*"
+    run_podman system df --verbose
+    assert "${lines[5]}" =~ \
+       "[0-9a-f]{12} *0.*[0-9a-f]{12}-infra" \
+       "system df --verbose, 'Containers', infra line"
+
+    run_podman pod rm -f $pod
+}
+
 @test "podman system df --format json functionality" {
     # Run two dummy containers, one which exits, one which stays running
-    run_podman run    --name stoppedcontainer $IMAGE true
-    run_podman run -d --name runningcontainer $IMAGE top
+    cname_stopped=c-stopped-$(safename)
+    cname_running=c-running-$(safename)
+
+    run_podman run    --name $cname_stopped $IMAGE true
+    run_podman run -d --name $cname_running $IMAGE top
     run_podman system df --format json
     local results="$output"
 
     # FIXME! This needs to be fiddled with every time we bump testimage.
-    local size=11
+    local size=12
     if [[ "$(uname -m)" = "aarch64" ]]; then
-        size=13
+        size=14
     fi
 
     # FIXME: we can't check exact RawSize or Size because every CI system
@@ -88,12 +104,14 @@ Size           |   ~${size}.*MB |        !0B |            0B
     done < <(parse_table "$tests")
 
     # Clean up
-    run_podman rm -f -t 0 stoppedcontainer runningcontainer
+    run_podman rm -f -t 0 $cname_stopped $cname_running
 }
 
 @test "podman system df - with active containers and volumes" {
-    run_podman run    -v /myvol1 --name c1 $IMAGE true
-    run_podman run -d -v /myvol2 --name c2 $IMAGE top
+    c1=c1-$(safename)
+    c2=c2-$(safename)
+    run_podman run    -v /myvol1 --name $c1 $IMAGE true
+    run_podman run -d -v /myvol2 --name $c2 $IMAGE top
 
     run_podman system df --format '{{ .Type }}:{{ .Total }}:{{ .Active }}'
     is "${lines[0]}" "Images:1:1"        "system df : Images line"
@@ -111,10 +129,10 @@ Size           |   ~${size}.*MB |        !0B |            0B
 
     # Containers are listed in random order. Just check that each has 1 volume
     is "${lines[5]}" \
-       "[0-9a-f]\{12\} *[0-9a-f]\{12\} .* 1 .* c[12]" \
+       "[0-9a-f]\{12\} *[0-9a-f]\{12\} .* 1 .* c[12]-$(safename)" \
        "system df -v, 'Containers', first line"
     is "${lines[6]}" \
-       "[0-9a-f]\{12\} *[0-9a-f]\{12\} .* 1 .* c[12]" \
+       "[0-9a-f]\{12\} *[0-9a-f]\{12\} .* 1 .* c[12]-$(safename)" \
        "system df -v, 'Containers', second line"
 
     # Volumes, likewise: random order.
@@ -134,28 +152,65 @@ Size           |   ~${size}.*MB |        !0B |            0B
     run_podman system df --format '{{.Reclaimable}}'
     is "${lines[0]}" "0B (0%)" "cannot reclaim image data as it's still used by the containers"
 
-    run_podman stop c2
+    run_podman stop $c2
 
     # Create a second image by committing a container.
-    run_podman container commit -q c1
+    run_podman container commit -q $c1
     image="$output"
 
     run_podman system df --format '{{.Reclaimable}}'
     is "${lines[0]}" ".* (100%)" "100 percent of image data is reclaimable because $IMAGE has unique size of 0"
 
-    # Make sure the unique size is now really 0.  We cannot use --format for
-    # that unfortunately but we can exploit the fact that $IMAGE is used by
-    # two containers.
+    # Note unique size is basically never 0, that is because we count certain image metadata that is always added.
+    # The unique size is not 100% stable either as the generated metadata seems to differ a few bytes each run,
+    # as such we just match any number and just check that MB/kB seems to line up.
+    #   regex for:       SHARED SIZE      |         UNIQUE SIZE       |   CONTAINERS
     run_podman system df -v
-    is "$output" ".*0B\\s\\+2.*"
+    assert "$output" =~ '[0-9]+.[0-9]+MB\s+[0-9]+.[0-9]+kB\s+2' "Shared and Unique Size 2"
+    assert "$output" =~ "[0-9]+.[0-9]+MB\s+[0-9]+.[0-9]+kB\s+0" "Shared and Unique Size 0"
 
-    run_podman rm c1 c2
+    run_podman rm $c1 $c2
 
     run_podman system df --format '{{.Reclaimable}}'
     is "${lines[0]}" ".* (100%)" "100 percent of image data is reclaimable because all containers are gone"
 
     run_podman rmi $image
     run_podman volume rm -a
+}
+
+# https://github.com/containers/podman/issues/24452
+@test "podman system df - Reclaimable is not negative" {
+    local c1="c1-$(safename)"
+    local c2="c2-$(safename)"
+    for t in "$c1" "$c2"; do
+        dir="${PODMAN_TMPDIR}${t}"
+        mkdir "$dir"
+        cat <<EOF >"$dir/Dockerfile"
+FROM $IMAGE
+RUN echo "${t}" >${t}.txt
+CMD ["sleep", "inf"]
+EOF
+
+    run_podman build --tag "${t}:latest" "$dir"
+    run_podman run -d --name $t "${t}:latest"
+    done
+
+    run_podman system df --format '{{.Reclaimable}}'
+    # Size might not be exactly static so match a range.
+    # Also note if you wondering why we claim 100% can be freed even though containers
+    # are using the images this value is simply broken.
+    # It always considers shared sizes as something that can be freed.
+    assert "${lines[0]}" =~ '1[0-9].[0-9]+MB \(100%\)' "Reclaimable size before prune"
+
+    # Prune the images to get rid of $IMAGE which is the shared parent
+    run_podman image prune -af
+
+    run_podman system df --format '{{.Reclaimable}}'
+    # Note this used to return something negative per #24452
+    assert "${lines[0]}" =~ '1[0-9].[0-9]+MB \(100%\)' "Reclaimable size after prune"
+
+    run_podman rm -f -t0 $c1 $c2
+    run_podman rmi  $c1 $c2
 }
 
 # vim: filetype=sh

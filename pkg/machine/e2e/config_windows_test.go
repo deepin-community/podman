@@ -4,6 +4,11 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega/gexec"
+
+	"github.com/containers/podman/v5/pkg/machine/define"
 )
 
 const podmanBinary = "../../../bin/windows/podman.exe"
@@ -22,4 +27,27 @@ func pgrep(n string) (string, error) {
 		return "", fmt.Errorf("no task found")
 	}
 	return strOut, nil
+}
+
+func getOtherProvider() string {
+	if isVmtype(define.WSLVirt) {
+		return "hyperv"
+	} else if isVmtype(define.HyperVVirt) {
+		return "wsl"
+	}
+	return ""
+}
+
+func runWslCommand(cmdArgs []string) (*machineSession, error) {
+	binary := "wsl"
+	GinkgoWriter.Println(binary + " " + strings.Join(cmdArgs, " "))
+	c := exec.Command(binary, cmdArgs...)
+	session, err := Start(c, GinkgoWriter, GinkgoWriter)
+	if err != nil {
+		Fail(fmt.Sprintf("Unable to start session: %q", err))
+		return nil, err
+	}
+	ms := machineSession{session}
+	ms.waitWithTimeout(defaultTimeout)
+	return &ms, nil
 }

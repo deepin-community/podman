@@ -18,6 +18,7 @@ import (
 	winio "github.com/Microsoft/go-winio"
 	"github.com/containers/podman/v5/pkg/machine/define"
 	"github.com/containers/podman/v5/pkg/machine/env"
+	"github.com/containers/podman/v5/pkg/machine/sockets"
 	"github.com/containers/storage/pkg/fileutils"
 	"github.com/sirupsen/logrus"
 )
@@ -35,7 +36,6 @@ const (
 	GlobalNameWait  = 250 * time.Millisecond
 )
 
-//nolint:stylecheck
 const WM_QUIT = 0x12
 
 type WinProxyOpts struct {
@@ -45,6 +45,7 @@ type WinProxyOpts struct {
 	RemoteUsername string
 	Rootful        bool
 	VMType         define.VMType
+	Socket         *define.VMFile
 }
 
 func GetProcessState(pid int) (active bool, exitCode int) {
@@ -129,10 +130,7 @@ func launchWinProxy(opts WinProxyOpts) (bool, string, error) {
 		return false, "", fmt.Errorf("could not start api proxy since expected pipe is not available: %s", machinePipe)
 	}
 
-	globalName := false
-	if PipeNameAvailable(GlobalNamedPipe, GlobalNameWait) {
-		globalName = true
-	}
+	globalName := PipeNameAvailable(GlobalNamedPipe, GlobalNameWait)
 
 	command, err := FindExecutablePeer(winSSHProxy)
 	if err != nil {
@@ -159,6 +157,12 @@ func launchWinProxy(opts WinProxyOpts) (bool, string, error) {
 		args = append(args, NamedPipePrefix+GlobalNamedPipe, dest, opts.IdentityPath)
 		waitPipe = GlobalNamedPipe
 	}
+
+	hostURL, err := sockets.ToUnixURL(opts.Socket)
+	if err != nil {
+		return false, "", err
+	}
+	args = append(args, hostURL.String(), dest, opts.IdentityPath)
 
 	cmd := exec.Command(command, args...)
 	logrus.Debugf("winssh command: %s %v", command, args)
@@ -243,12 +247,34 @@ func FindExecutablePeer(name string) (string, error) {
 		return "", err
 	}
 
-	exe, err = filepath.EvalSymlinks(exe)
+	exe, err = EvalSymlinksOrClean(exe)
 	if err != nil {
 		return "", err
 	}
 
 	return filepath.Join(filepath.Dir(exe), name), nil
+}
+
+func EvalSymlinksOrClean(filePath string) (string, error) {
+	fileInfo, err := os.Lstat(filePath)
+	if err != nil {
+		return "", err
+	}
+	if fileInfo.Mode()&fs.ModeSymlink != 0 {
+		// Only call filepath.EvalSymlinks if it is a symlink.
+		// Starting with v1.23, EvalSymlinks returns an error for mount points.
+		// See https://go-review.googlesource.com/c/go/+/565136 for reference.
+		filePath, err = filepath.EvalSymlinks(filePath)
+		if err != nil {
+			return "", err
+		}
+	} else {
+		// Call filepath.Clean when filePath is not a symlink. That's for
+		// consistency with the symlink case (filepath.EvalSymlinks calls
+		// Clean after evaluating filePath).
+		filePath = filepath.Clean(filePath)
+	}
+	return filePath, nil
 }
 
 func GetWinProxyStateDir(name string, vmtype define.VMType) (string, error) {

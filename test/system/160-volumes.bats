@@ -242,7 +242,6 @@ EOF
 
 # Podman volume import test
 @test "podman volume import test" {
-    skip_if_remote "volumes import is not applicable on podman-remote"
     run_podman volume create --driver local my_vol
     run_podman run --rm -v my_vol:/data $IMAGE sh -c "echo hello >> /data/test"
     run_podman volume create my_vol2
@@ -260,8 +259,6 @@ EOF
 
 # stdout with NULs is easier to test here than in ginkgo
 @test "podman volume export to stdout" {
-    skip_if_remote "N/A on podman-remote"
-
     local volname="myvol_$(random_string 10)"
     local mountpoint="/data$(random_string 8)"
 
@@ -516,7 +513,6 @@ NeedsChown    | true
 FROM $IMAGE
 VOLUME /data
 EOF
-    fs=$(stat -f -c %T .)
     run_podman build -t volume_image $tmpdir
 
     containersconf=$tmpdir/containers.conf
@@ -534,15 +530,16 @@ EOF
     CONTAINERS_CONF_OVERRIDE="$containersconf" run_podman run --rm volume_image stat -f -c %T /data
     is "$output" "tmpfs" "Should be tmpfs"
 
-    # get the hostfs first so we can match it below
+    # Get the hostfs first so we can match it below. The important check is
+    # the HEX filesystem type (%t); readable one (%T) is for ease of debugging.
+    # We can't compare %T because our alpine-based testimage doesn't grok btrfs.
     run_podman info --format {{.Store.GraphRoot}}
-    hostfs=$(stat -f -c %T $output)
+    hostfs=$(stat -f -c '%t %T' $output)
+    echo "# for debug: stat( $output ) = '$hostfs'"
 
-    # stat -f -c %T seems to just return unknown for our normal bind mount for some reason.
-    # Therfore manually parse /proc/mounts to get the real fs for the bind mount.
-    CONTAINERS_CONF_OVERRIDE="$containersconf" run_podman run --image-volume anonymous --rm volume_image \
-        sh -c "grep ' /data ' /proc/mounts | cut -f3 -d' '"
-    assert "$output" == "$hostfs" "Should match hosts graphroot fs"
+    # "${foo%% *}" strips everything after the first space: "9123683e btrfs" -> "9123683e"
+    CONTAINERS_CONF_OVERRIDE="$containersconf" run_podman run --image-volume anonymous --rm volume_image stat -f -c '%t %T' /data
+    assert "${output%% *}" == "${hostfs%% *}" "/data fs type should match hosts graphroot"
 
     CONTAINERS_CONF_OVERRIDE="$containersconf" run_podman run --image-volume tmpfs --rm volume_image stat -f -c %T /data
     is "$output" "tmpfs" "Should be tmpfs"

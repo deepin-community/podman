@@ -76,7 +76,7 @@ Set the exit policy of the pod when the last container exits.  Supported policie
 | Exit Policy        | Description                                                                                                                |
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------- |
 | *continue*         | The pod continues running, by keeping its infra container alive, when the last container exits. Used by default.           |
-| *stop*             | The pod (including its infra container) is stopped when the last container exits. Used in `kube play`.                     |
+| *stop*             | The pod (including its infra container) is stopped when the last container exits. Used in `kube play` and quadlets.        |
 
 @@option gidmap.pod
 
@@ -87,6 +87,8 @@ Set the exit policy of the pod when the last container exits.  Supported policie
 Print usage statement.
 
 @@option hostname.pod
+
+@@option hosts-file
 
 #### **--infra**
 
@@ -125,6 +127,8 @@ Assign a name to the pod.
 Invalid if using **--dns**, **--dns-option**, or **--dns-search** with **--network** set to **none** or **container:**_id_.
 
 @@option network-alias
+
+@@option no-hostname
 
 @@option no-hosts
 
@@ -226,6 +230,10 @@ $ podman pod create --network net1:ip=10.89.1.5 --network net2:ip=10.89.10.10
 ## SEE ALSO
 **[podman(1)](podman.1.md)**, **[podman-pod(1)](podman-pod.1.md)**, **[podman-kube-play(1)](podman-kube-play.1.md)**, **containers.conf(1)**, **[cgroups(7)](https://man7.org/linux/man-pages/man7/cgroups.7.html)**
 
+### Troubleshooting
+
+See [podman-troubleshooting(7)](https://github.com/containers/podman/blob/main/troubleshooting.md)
+for solutions to common issues.
 
 ## HISTORY
 July 2018, Originally compiled by Peter Hunt <pehunt@redhat.com>

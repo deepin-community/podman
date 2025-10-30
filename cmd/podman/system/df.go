@@ -275,7 +275,10 @@ func (d *dfContainer) ContainerID() string {
 }
 
 func (d *dfContainer) Image() string {
-	return d.SystemDfContainerReport.Image[0:12]
+	if len(d.SystemDfContainerReport.Image) >= 12 {
+		return d.SystemDfContainerReport.Image[0:12]
+	}
+	return ""
 }
 
 func (d *dfContainer) Command() string {
@@ -319,7 +322,7 @@ func (d *dfSummary) Reclaimable() string {
 	return fmt.Sprintf("%s (%d%%)", units.HumanSize(float64(d.RawReclaimable)), percent)
 }
 
-func (d dfSummary) MarshalJSON() ([]byte, error) {
+func (d *dfSummary) MarshalJSON() ([]byte, error) {
 	// need to create a new type here to prevent infinite recursion in MarshalJSON() call
 	type rawDf dfSummary
 
@@ -329,5 +332,5 @@ func (d dfSummary) MarshalJSON() ([]byte, error) {
 		TotalCount  int
 		Size        string
 		Reclaimable string
-	}{rawDf(d), d.Total, d.Size(), d.Reclaimable()})
+	}{rawDf(*d), d.Total, d.Size(), d.Reclaimable()})
 }

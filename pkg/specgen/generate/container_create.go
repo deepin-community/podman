@@ -22,7 +22,7 @@ import (
 	"github.com/containers/podman/v5/pkg/specgenutil"
 	"github.com/containers/podman/v5/pkg/util"
 	"github.com/opencontainers/runtime-spec/specs-go"
-	"github.com/opencontainers/selinux/go-selinux/label"
+	"github.com/opencontainers/selinux/go-selinux"
 	"github.com/sirupsen/logrus"
 	"tags.cncf.io/container-device-interface/pkg/parser"
 )
@@ -507,6 +507,20 @@ func createContainerOptions(rt *libpod.Runtime, s *specgen.SpecGenerator, pod *l
 		options = append(options, libpod.WithImageVolumes(vols))
 	}
 
+	if len(s.ArtifactVolumes) != 0 {
+		vols := make([]*libpod.ContainerArtifactVolume, 0, len(s.ArtifactVolumes))
+		for _, v := range s.ArtifactVolumes {
+			vols = append(vols, &libpod.ContainerArtifactVolume{
+				Dest:   v.Destination,
+				Source: v.Source,
+				Digest: v.Digest,
+				Title:  v.Title,
+				Name:   v.Name,
+			})
+		}
+		options = append(options, libpod.WithArtifactVolumes(vols))
+	}
+
 	if s.Command != nil {
 		options = append(options, libpod.WithCommand(s.Command))
 	}
@@ -565,7 +579,7 @@ func createContainerOptions(rt *libpod.Runtime, s *specgen.SpecGenerator, pod *l
 			return nil, err
 		}
 		if processLabel != "" {
-			selinuxOpts, err := label.DupSecOpt(processLabel)
+			selinuxOpts, err := selinux.DupSecOpt(processLabel)
 			if err != nil {
 				return nil, err
 			}
@@ -641,6 +655,10 @@ func createContainerOptions(rt *libpod.Runtime, s *specgen.SpecGenerator, pod *l
 	if s.ContainerHealthCheckConfig.HealthCheckOnFailureAction != define.HealthCheckOnFailureActionNone {
 		options = append(options, libpod.WithHealthCheckOnFailureAction(s.ContainerHealthCheckConfig.HealthCheckOnFailureAction))
 	}
+
+	options = append(options, libpod.WithHealthCheckLogDestination(s.ContainerHealthCheckConfig.HealthLogDestination))
+	options = append(options, libpod.WithHealthCheckMaxLogCount(s.ContainerHealthCheckConfig.HealthMaxLogCount))
+	options = append(options, libpod.WithHealthCheckMaxLogSize(s.ContainerHealthCheckConfig.HealthMaxLogSize))
 
 	if s.SdNotifyMode == define.SdNotifyModeHealthy && !healthCheckSet {
 		return nil, fmt.Errorf("%w: sdnotify policy %q requires a healthcheck to be set", define.ErrInvalidArg, s.SdNotifyMode)

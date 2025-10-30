@@ -24,7 +24,7 @@ rm -f $SYSTEMD_CONF $ENVD_CONF $PROFILE_CONF
 
 echo "[Manager]" >> $SYSTEMD_CONF
 for proxy in %s; do
-	printf "DefaultEnvironment=%%q\n" "$proxy"  >> $SYSTEMD_CONF
+	printf "DefaultEnvironment=\"%%s\"\n" "$proxy"  >> $SYSTEMD_CONF
 	printf "%%q\n" "$proxy"  >> $ENVD_CONF
 	printf "export %%q\n" "$proxy" >> $PROFILE_CONF
 done
@@ -52,6 +52,6 @@ func getProxyScript(isWSL bool) io.Reader {
 }
 
 func ApplyProxies(mc *vmconfigs.MachineConfig) error {
-	return machine.CommonSSHWithStdin("root", mc.SSH.IdentityPath, mc.Name, mc.SSH.Port, []string{"/usr/bin/bash"},
+	return machine.LocalhostSSHWithStdin("root", mc.SSH.IdentityPath, mc.Name, mc.SSH.Port, []string{"/usr/bin/bash"},
 		getProxyScript(mc.WSLHypervisor != nil))
 }

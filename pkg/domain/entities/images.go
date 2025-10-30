@@ -5,51 +5,11 @@ import (
 	"net/url"
 
 	"github.com/containers/common/pkg/config"
-	"github.com/containers/image/v5/manifest"
 	"github.com/containers/image/v5/signature/signer"
 	"github.com/containers/image/v5/types"
 	encconfig "github.com/containers/ocicrypt/config"
 	entitiesTypes "github.com/containers/podman/v5/pkg/domain/entities/types"
-	"github.com/docker/docker/api/types/container"
-	"github.com/opencontainers/go-digest"
-	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 )
-
-type Image struct {
-	ID              string            `json:"Id"`
-	RepoTags        []string          `json:",omitempty"`
-	RepoDigests     []string          `json:",omitempty"`
-	Parent          string            `json:",omitempty"`
-	Comment         string            `json:",omitempty"`
-	Created         string            `json:",omitempty"`
-	Container       string            `json:",omitempty"`
-	ContainerConfig *container.Config `json:",omitempty"`
-	DockerVersion   string            `json:",omitempty"`
-	Author          string            `json:",omitempty"`
-	Config          *container.Config `json:",omitempty"`
-	Architecture    string            `json:",omitempty"`
-	Variant         string            `json:",omitempty"`
-	Os              string            `json:",omitempty"`
-	OsVersion       string            `json:",omitempty"`
-	Size            int64             `json:",omitempty"`
-	VirtualSize     int64             `json:",omitempty"`
-	GraphDriver     string            `json:",omitempty"`
-	RootFS          string            `json:",omitempty"`
-	Metadata        string            `json:",omitempty"`
-
-	// Podman extensions
-	Digest        digest.Digest                 `json:",omitempty"`
-	PodmanVersion string                        `json:",omitempty"`
-	ManifestType  string                        `json:",omitempty"`
-	User          string                        `json:",omitempty"`
-	History       []v1.History                  `json:",omitempty"`
-	NamesHistory  []string                      `json:",omitempty"`
-	HealthCheck   *manifest.Schema2HealthConfig `json:",omitempty"`
-}
-
-func (i *Image) Id() string { //nolint:revive,stylecheck
-	return i.ID
-}
 
 type ImageSummary = entitiesTypes.ImageSummary
 
@@ -64,7 +24,8 @@ type ImageRemoveOptions struct {
 	// Confirms if given name is a manifest list and removes it, otherwise returns error.
 	LookupManifest bool
 	// NoPrune will not remove dangling images
-	NoPrune bool
+	NoPrune                      bool
+	DisableForceRemoveContainers bool
 }
 
 // ImageRemoveReport is the response for removing one or more image(s) from storage
@@ -73,8 +34,10 @@ type ImageRemoveReport = entitiesTypes.ImageRemoveReport
 
 type ImageHistoryOptions struct{}
 
-type ImageHistoryLayer = entitiesTypes.ImageHistoryLayer
-type ImageHistoryReport = entitiesTypes.ImageHistoryReport
+type (
+	ImageHistoryLayer  = entitiesTypes.ImageHistoryLayer
+	ImageHistoryReport = entitiesTypes.ImageHistoryReport
+)
 
 // ImagePullOptions are the arguments for pulling images.
 type ImagePullOptions struct {
@@ -249,13 +212,16 @@ type ImageListOptions struct {
 }
 
 type ImagePruneOptions struct {
-	All      bool     `json:"all" schema:"all"`
-	External bool     `json:"external" schema:"external"`
-	Filter   []string `json:"filter" schema:"filter"`
+	All        bool     `json:"all" schema:"all"`
+	External   bool     `json:"external" schema:"external"`
+	BuildCache bool     `json:"buildcache" schema:"buildcache"`
+	Filter     []string `json:"filter" schema:"filter"`
 }
 
-type ImageTagOptions struct{}
-type ImageUntagOptions struct{}
+type (
+	ImageTagOptions   struct{}
+	ImageUntagOptions struct{}
+)
 
 // ImageInspectReport is the data when inspecting an image.
 type ImageInspectReport = entitiesTypes.ImageInspectReport
@@ -304,21 +270,13 @@ type ImageSaveOptions struct {
 	SignaturePolicy string
 }
 
-// ImageScpOptions provide options for securely copying images to and from a remote host
+// ImageScpOptions provides options for ImageEngine.Scp()
 type ImageScpOptions struct {
-	// Remote determines if this entity is operating on a remote machine
-	Remote bool `json:"remote,omitempty"`
-	// File is the input/output file for the save and load Operation
-	File string `json:"file,omitempty"`
-	// Quiet Determines if the save and load operation will be done quietly
-	Quiet bool `json:"quiet,omitempty"`
-	// Image is the image the user is providing to save and load
-	Image string `json:"image,omitempty"`
-	// User is used in conjunction with Transfer to determine if a valid user was given to save from/load into
-	User string `json:"user,omitempty"`
-	// Tag is the name to be used for the image on the destination
-	Tag string `json:"tag,omitempty"`
+	ScpExecuteTransferOptions
 }
+
+// ImageScpReport provides results from ImageEngine.Scp()
+type ImageScpReport struct{}
 
 // ImageScpConnections provides the ssh related information used in remote image transfer
 type ImageScpConnections struct {

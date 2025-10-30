@@ -16,11 +16,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/BurntSushi/toml"
-	"github.com/containers/common/pkg/config"
 	"github.com/containers/image/v5/types"
 	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/errorhandling"
 	"github.com/containers/podman/v5/pkg/namespaces"
 	"github.com/containers/podman/v5/pkg/rootless"
 	"github.com/containers/podman/v5/pkg/signal"
@@ -41,17 +38,6 @@ type idMapFlags struct {
 	Extends  bool // The "+" flag
 	UserMap  bool // The "u" flag
 	GroupMap bool // The "g" flag
-}
-
-var containerConfig *config.Config
-
-func init() {
-	var err error
-	containerConfig, err = config.Default()
-	if err != nil {
-		logrus.Error(err)
-		os.Exit(1)
-	}
 }
 
 // Helper function to determine the username/password passed
@@ -84,7 +70,7 @@ func ParseDockerignore(containerfiles []string, root string) ([]string, string, 
 		// does not attempts to re-resolve it
 		ignoreFile = path
 		ignore, dockerIgnoreErr = os.ReadFile(path)
-		if os.IsNotExist(dockerIgnoreErr) {
+		if errors.Is(dockerIgnoreErr, fs.ErrNotExist) {
 			// In this case either ignorefile was not found
 			// or it is a symlink to unexpected file in such
 			// case manually set ignorefile to `/dev/null` so
@@ -185,7 +171,7 @@ func ParseSignal(rawSignal string) (syscall.Signal, error) {
 	return sig, nil
 }
 
-func getRootlessKeepIDMapping(uid, gid int, uids, gids []idtools.IDMap) (*stypes.IDMappingOptions, int, int, error) {
+func getRootlessKeepIDMapping(uid, gid int, uids, gids []idtools.IDMap, maxSize int) (*stypes.IDMappingOptions, int, int, error) {
 	options := stypes.IDMappingOptions{
 		HostUIDMapping: false,
 		HostGIDMapping: false,
@@ -196,6 +182,11 @@ func getRootlessKeepIDMapping(uid, gid int, uids, gids []idtools.IDMap) (*stypes
 	}
 	for _, g := range gids {
 		maxGID += g.Size
+	}
+	if maxSize > 0 {
+		// If maxSize is set, we need to ensure that the mappings are within the available range
+		maxUID = min(maxUID, maxSize-1)
+		maxGID = min(maxGID, maxSize-1)
 	}
 
 	options.UIDMap, options.GIDMap = nil, nil
@@ -252,13 +243,17 @@ func GetKeepIDMapping(opts *namespaces.KeepIDUserNsOptions) (*stypes.IDMappingOp
 	if opts.GID != nil {
 		gid = int(*opts.GID)
 	}
+	maxSize := 0
+	if opts.MaxSize != nil {
+		maxSize = int(*opts.MaxSize)
+	}
 
 	uids, gids, err := rootless.GetConfiguredMappings(true)
 	if err != nil {
 		return nil, -1, -1, fmt.Errorf("cannot read mappings: %w", err)
 	}
 
-	return getRootlessKeepIDMapping(uid, gid, uids, gids)
+	return getRootlessKeepIDMapping(uid, gid, uids, gids, maxSize)
 }
 
 // GetNoMapMapping returns the mappings and the user to use when nomap is used
@@ -429,20 +424,6 @@ func parseTriple(spec []string, parentMapping []ruser.IDMap, mapSetting string) 
 		})
 	}
 	return mappings, flags, nil
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 // Remove any conflicting mapping from mapping present in extension, so
@@ -1059,56 +1040,6 @@ func ParseIDMapping(mode namespaces.UsernsMode, uidMapSlice, gidMapSlice []strin
 	return &options, nil
 }
 
-type tomlOptionsConfig struct {
-	MountProgram string `toml:"mount_program"`
-}
-
-type tomlConfig struct {
-	Storage struct {
-		Driver    string                      `toml:"driver"`
-		RunRoot   string                      `toml:"runroot"`
-		GraphRoot string                      `toml:"graphroot"`
-		Options   struct{ tomlOptionsConfig } `toml:"options"`
-	} `toml:"storage"`
-}
-
-func getTomlStorage(storeOptions *stypes.StoreOptions) *tomlConfig {
-	config := new(tomlConfig)
-
-	config.Storage.Driver = storeOptions.GraphDriverName
-	config.Storage.RunRoot = storeOptions.RunRoot
-	config.Storage.GraphRoot = storeOptions.GraphRoot
-	for _, i := range storeOptions.GraphDriverOptions {
-		program, hasPrefix := strings.CutPrefix(i, "overlay.mount_program=")
-		if hasPrefix {
-			config.Storage.Options.MountProgram = program
-		}
-	}
-
-	return config
-}
-
-// WriteStorageConfigFile writes the configuration to a file
-func WriteStorageConfigFile(storageOpts *stypes.StoreOptions, storageConf string) error {
-	if err := os.MkdirAll(filepath.Dir(storageConf), 0755); err != nil {
-		return err
-	}
-	storageFile, err := os.OpenFile(storageConf, os.O_RDWR|os.O_TRUNC, 0600)
-	if err != nil {
-		return err
-	}
-	tomlConfiguration := getTomlStorage(storageOpts)
-	defer errorhandling.CloseQuiet(storageFile)
-	enc := toml.NewEncoder(storageFile)
-	if err := enc.Encode(tomlConfiguration); err != nil {
-		if err := os.Remove(storageConf); err != nil {
-			logrus.Error(err)
-		}
-		return err
-	}
-	return nil
-}
-
 // ParseInputTime takes the users input and to determine if it is valid and
 // returns a time format and error.  The input is compared to known time formats
 // or a duration which implies no-duration
@@ -1138,33 +1069,6 @@ func ParseInputTime(inputTime string, since bool) (time.Time, error) {
 		return time.Now().Add(-duration), nil
 	}
 	return time.Now().Add(duration), nil
-}
-
-// OpenExclusiveFile opens a file for writing and ensure it doesn't already exist
-func OpenExclusiveFile(path string) (*os.File, error) {
-	baseDir := filepath.Dir(path)
-	if baseDir != "" {
-		if err := fileutils.Exists(baseDir); err != nil {
-			return nil, err
-		}
-	}
-	return os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0666)
-}
-
-// ExitCode reads the error message when failing to executing container process
-// and then returns 0 if no error, 126 if command does not exist, or 127 for
-// all other errors
-func ExitCode(err error) int {
-	if err == nil {
-		return 0
-	}
-	e := strings.ToLower(err.Error())
-	if strings.Contains(e, "file not found") ||
-		strings.Contains(e, "no such file or directory") {
-		return 127
-	}
-
-	return 126
 }
 
 func Tmpdir() string {
@@ -1223,10 +1127,6 @@ func ValidateSysctls(strSlice []string) (map[string]string, error) {
 		}
 	}
 	return sysctl, nil
-}
-
-func DefaultContainerConfig() *config.Config {
-	return containerConfig
 }
 
 func CreateIDFile(path string, id string) error {

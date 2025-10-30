@@ -50,14 +50,6 @@ const (
 // shutdownOnce ensures Shutdown() may safely be called from several go routines
 var shutdownOnce sync.Once
 
-// NewServer will create and configure a new API server with all defaults
-func NewServer(runtime *libpod.Runtime) (*APIServer, error) {
-	return newServer(runtime, nil, entities.ServiceOptions{
-		CorsHeaders: DefaultCorsHeaders,
-		Timeout:     DefaultServiceDuration,
-	})
-}
-
 // NewServerWithSettings will create and configure a new API server using provided settings
 func NewServerWithSettings(runtime *libpod.Runtime, listener net.Listener, opts entities.ServiceOptions) (*APIServer, error) {
 	return newServer(runtime, listener, opts)
@@ -119,6 +111,7 @@ func newServer(runtime *libpod.Runtime, listener net.Listener, opts entities.Ser
 
 	for _, fn := range []func(*mux.Router) error{
 		server.registerAuthHandlers,
+		server.registerArtifactHandlers,
 		server.registerArchiveHandlers,
 		server.registerContainersHandlers,
 		server.registerDistributionHandlers,
@@ -197,7 +190,13 @@ func (s *APIServer) Serve() error {
 	s.setupPprof()
 
 	if err := shutdown.Register("service", func(sig os.Signal) error {
-		return s.Shutdown(true)
+		err := s.Shutdown(true)
+		if err == nil {
+			// For `systemctl stop podman.service` support, exit code should be 0
+			// but only if we did indeed gracefully shutdown
+			shutdown.SetExitCode(0)
+		}
+		return err
 	}); err != nil {
 		return err
 	}
@@ -290,9 +289,4 @@ func (s *APIServer) Shutdown(halt bool) error {
 		<-ctx.Done()
 	})
 	return nil
-}
-
-// Close immediately stops responding to clients and exits
-func (s *APIServer) Close() error {
-	return s.Server.Close()
 }

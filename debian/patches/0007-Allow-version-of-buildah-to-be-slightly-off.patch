@@ -1,0 +1,59 @@
+From: Reinhard Tartler <siretart@tauware.de>
+Date: Sun, 5 Oct 2025 16:16:20 -0400
+Subject: Allow version of buildah to be slightly off
+
+When upstream is running these tests, they are guaranteed to be the same. In
+Debian, the minor version might be slightly off without any issues
+---
+ test/e2e/build_test.go | 17 ++++++++++-------
+ 1 file changed, 10 insertions(+), 7 deletions(-)
+
+diff --git a/test/e2e/build_test.go b/test/e2e/build_test.go
+index a1f8375..c7433ce 100644
+--- a/test/e2e/build_test.go
++++ b/test/e2e/build_test.go
+@@ -11,7 +11,7 @@ import (
+ 	"runtime"
+ 	"strings"
+ 
+-	"github.com/containers/buildah/define"
++	//	"github.com/containers/buildah/define"
+ 	. "github.com/containers/podman/v5/test/utils"
+ 	. "github.com/onsi/ginkgo/v2"
+ 	. "github.com/onsi/gomega"
+@@ -393,8 +393,9 @@ RUN exit 5`, CITEST_IMAGE)
+ 		// Verify that OS and Arch are being set
+ 		inspect := podmanTest.Podman([]string{"image", "inspect", "--format", "{{ index .Config.Labels }}", "test"})
+ 		inspect.WaitWithDefaultTimeout()
+-		data := inspect.OutputToString()
+-		Expect(data).To(ContainSubstring(define.Version))
++		// Debian - version of buildah might be slightly off
++		// data := inspect.OutputToString()
++		// Expect(data).To(ContainSubstring(define.Version))
+ 	})
+ 
+ 	It("podman build and check identity with always", func() {
+@@ -406,8 +407,9 @@ RUN exit 5`, CITEST_IMAGE)
+ 		// Verify that OS and Arch are being set
+ 		inspect := podmanTest.Podman([]string{"image", "inspect", "--format", "{{ index .Config.Labels }}", "test1"})
+ 		inspect.WaitWithDefaultTimeout()
+-		data := inspect.OutputToString()
+-		Expect(data).To(ContainSubstring(define.Version))
++		// Debian - version of buildah might be slightly off
++		// data := inspect.OutputToString()
++		// Expect(data).To(ContainSubstring(define.Version))
+ 
+ 		// with --pull-always
+ 		session = podmanTest.Podman([]string{"build", "-q", "--pull-always", "-f", "build/basicalpine/Containerfile.path", "--no-cache", "-t", "test2", "build/basicalpine"})
+@@ -417,8 +419,9 @@ RUN exit 5`, CITEST_IMAGE)
+ 		// Verify that OS and Arch are being set
+ 		inspect = podmanTest.Podman([]string{"image", "inspect", "--format", "{{ index .Config.Labels }}", "test2"})
+ 		inspect.WaitWithDefaultTimeout()
+-		data = inspect.OutputToString()
+-		Expect(data).To(ContainSubstring(define.Version))
++		// Debian - version of buildah might be slightly off
++		// data = inspect.OutputToString()
++		// Expect(data).To(ContainSubstring(define.Version))
+ 	})
+ 
+ 	It("podman-remote send correct path to copier", func() {

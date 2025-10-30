@@ -47,44 +47,38 @@ const (
 	// InvalidNS is an invalid namespace
 	InvalidNS LinuxNS = iota
 	// IPCNS is the IPC namespace
-	IPCNS LinuxNS = iota
+	IPCNS
 	// MountNS is the mount namespace
-	MountNS LinuxNS = iota
+	MountNS
 	// NetNS is the network namespace
-	NetNS LinuxNS = iota
+	NetNS
 	// PIDNS is the PID namespace
-	PIDNS LinuxNS = iota
+	PIDNS
 	// UserNS is the user namespace
-	UserNS LinuxNS = iota
+	UserNS
 	// UTSNS is the UTS namespace
-	UTSNS LinuxNS = iota
+	UTSNS
 	// CgroupNS is the Cgroup namespace
-	CgroupNS LinuxNS = iota
+	CgroupNS
 )
 
 // String returns a string representation of a Linux namespace
 // It is guaranteed to be the name of the namespace in /proc for valid ns types
 func (ns LinuxNS) String() string {
-	switch ns {
-	case InvalidNS:
-		return "invalid"
-	case IPCNS:
-		return "ipc"
-	case MountNS:
-		return "mnt"
-	case NetNS:
-		return "net"
-	case PIDNS:
-		return "pid"
-	case UserNS:
-		return "user"
-	case UTSNS:
-		return "uts"
-	case CgroupNS:
-		return "cgroup"
-	default:
-		return "unknown"
+	s := [...]string{
+		InvalidNS: "invalid",
+		IPCNS:     "ipc",
+		MountNS:   "mnt",
+		NetNS:     "net",
+		PIDNS:     "pid",
+		UserNS:    "user",
+		UTSNS:     "uts",
+		CgroupNS:  "cgroup",
 	}
+	if ns >= 0 && int(ns) < len(s) {
+		return s[ns]
+	}
+	return "unknown"
 }
 
 // Container is a single OCI container.
@@ -257,7 +251,7 @@ type ContainerNamedVolume struct {
 	// This is used for emptyDir volumes from a kube yaml
 	IsAnonymous bool `json:"setAnonymous,omitempty"`
 	// SubPath determines which part of the Source will be mounted in the container
-	SubPath string
+	SubPath string `json:",omitempty"`
 }
 
 // ContainerOverlayVolume is an overlay volume that will be mounted into the
@@ -284,6 +278,33 @@ type ContainerImageVolume struct {
 	ReadWrite bool `json:"rw"`
 	// SubPath determines which part of the image will be mounted into the container.
 	SubPath string `json:"subPath,omitempty"`
+}
+
+// ContainerArtifactVolume is a volume based on a artifact. The artifact blobs will
+// be bind mounted directly as files and must always be read only.
+type ContainerArtifactVolume struct {
+	// Source is the name or digest of the artifact that should be mounted
+	Source string `json:"source"`
+	// Dest is the absolute path of the mount in the container.
+	// If path is a file in the container, then the artifact must consist of a single blob.
+	// Otherwise if it is a directory or does not exists all artifact blobs will be mounted
+	// into this path as files. As name the "org.opencontainers.image.title" will be used if
+	// available otherwise the digest is used as name.
+	Dest string `json:"dest"`
+	// Title can be used for multi blob artifacts to only mount the one specific blob that
+	// matches the "org.opencontainers.image.title" annotation.
+	// Optional. Conflicts with Digest.
+	Title string `json:"title"`
+	// Digest can be used to filter a single blob from a multi blob artifact by the given digest.
+	// When this option is set the file name in the container defaults to the digest even when
+	// the title annotation exist.
+	// Optional. Conflicts with Title.
+	Digest string `json:"digest"`
+	// Name is the name that should be used for the path inside the container. When a single blob
+	// is mounted the name is used as is. If multiple blobs are mounted then mount them as
+	// "<name>-x" where x is a 0 indexed integer based on the layer order.
+	// Optional.
+	Name string `json:"name,omitempty"`
 }
 
 // ContainerSecret is a secret that is mounted in a container
@@ -648,6 +669,14 @@ func (c *Container) LogTag() string {
 	return c.config.LogTag
 }
 
+// LogSizeMax returns the maximum size of the container's log file.
+func (c *Container) LogSizeMax() int64 {
+	if c.config.LogSize > 0 {
+		return c.config.LogSize
+	}
+	return c.runtime.config.Containers.LogSizeMax
+}
+
 // RestartPolicy returns the container's restart policy.
 func (c *Container) RestartPolicy() string {
 	return c.config.RestartPolicy
@@ -672,8 +701,12 @@ func (c *Container) RuntimeName() string {
 // Runtime spec accessors
 // Unlocked
 
-// Hostname gets the container's hostname
-func (c *Container) Hostname() string {
+// hostname determines the container's hostname.
+// If 'network' is true and the container isn't running in a
+// private UTS namespoace, an empty string will be returned
+// instead of the host's hostname because we never want to
+// send the host's hostname to a DHCP or DNS server.
+func (c *Container) hostname(network bool) string {
 	if c.config.UTSNsCtr != "" {
 		utsNsCtr, err := c.runtime.GetContainer(c.config.UTSNsCtr)
 		if err != nil {
@@ -683,23 +716,64 @@ func (c *Container) Hostname() string {
 		}
 		return utsNsCtr.Hostname()
 	}
+
 	if c.config.Spec.Hostname != "" {
 		return c.config.Spec.Hostname
 	}
 
-	// if the container is not running in a private UTS namespace,
-	// return the host's hostname.
+	// If the container is not running in a private UTS namespace,
+	// return the host's hostname unless 'network' is true in which
+	// case we return an empty string.
 	privateUTS := c.hasPrivateUTS()
 	if !privateUTS {
 		hostname, err := os.Hostname()
 		if err == nil {
+			if network {
+				return ""
+			}
 			return hostname
 		}
+		logrus.Errorf("unable to get host's hostname for container %s: %v", c.ID(), err)
+		return ""
 	}
+
+	// If container_name_as_hostname is set in the CONTAINERS table in
+	// containers.conf, use a sanitized version of the container's name
+	// as the hostname.  Since the container name must already match
+	// the set '[a-zA-Z0-9][a-zA-Z0-9_.-]*', we can just remove any
+	// underscores and limit it to 64 characters to make it a valid
+	// hostname.
+	if c.runtime.config.Containers.ContainerNameAsHostName {
+		sanitizedHostname := strings.ReplaceAll(c.Name(), "_", "")
+		if len(sanitizedHostname) <= 64 {
+			return sanitizedHostname
+		}
+		return sanitizedHostname[:64]
+	}
+
+	// Otherwise use the container's short ID as the hostname.
 	if len(c.ID()) < 11 {
 		return c.ID()
 	}
 	return c.ID()[:12]
+}
+
+// Hostname gets the container's hostname
+func (c *Container) Hostname() string {
+	return c.hostname(false)
+}
+
+// If the container isn't running in a private UTS namespace, Hostname()
+// will return the host's hostname as the container's hostname. If netavark
+// were to try and obtain a DHCP lease with the host's hostname in an environment
+// where DDNS was active, bad things could happen. NetworkHostname() on the
+// other hand, will return an empty string if the container isn't running
+// in a private UTS namespace.
+//
+// This function should only be used to populate the ContainerHostname member
+// of the common.libnetwork.types.NetworkOptions struct.
+func (c *Container) NetworkHostname() string {
+	return c.hostname(true)
 }
 
 // WorkingDir returns the containers working dir
@@ -1205,6 +1279,11 @@ func (c *Container) IsInfra() bool {
 	return c.config.IsInfra
 }
 
+// IsDefaultInfra returns whether the container is a default infra container generated directly by podman
+func (c *Container) IsDefaultInfra() bool {
+	return c.config.IsDefaultInfra
+}
+
 // IsInitCtr returns whether the container is an init container
 func (c *Container) IsInitCtr() bool {
 	return len(c.config.InitContainerType) > 0
@@ -1252,6 +1331,27 @@ func (c *Container) HealthCheckConfig() *manifest.Schema2HealthConfig {
 	return c.config.HealthCheckConfig
 }
 
+func (c *Container) HealthCheckLogDestination() string {
+	if c.config.HealthLogDestination == nil {
+		return define.DefaultHealthCheckLocalDestination
+	}
+	return *c.config.HealthLogDestination
+}
+
+func (c *Container) HealthCheckMaxLogCount() uint {
+	if c.config.HealthMaxLogCount == nil {
+		return define.DefaultHealthMaxLogCount
+	}
+	return *c.config.HealthMaxLogCount
+}
+
+func (c *Container) HealthCheckMaxLogSize() uint {
+	if c.config.HealthMaxLogSize == nil {
+		return define.DefaultHealthMaxLogSize
+	}
+	return *c.config.HealthMaxLogSize
+}
+
 // AutoRemove indicates whether the container will be removed after it is executed
 func (c *Container) AutoRemove() bool {
 	spec := c.config.Spec
@@ -1259,6 +1359,17 @@ func (c *Container) AutoRemove() bool {
 		return false
 	}
 	return spec.Annotations[define.InspectAnnotationAutoremove] == define.InspectResponseTrue
+}
+
+// AutoRemoveImage indicates that the container will automatically remove the
+// image it is using after it exits and is removed.
+// Only allowed if AutoRemove is true.
+func (c *Container) AutoRemoveImage() bool {
+	spec := c.config.Spec
+	if spec.Annotations == nil {
+		return false
+	}
+	return spec.Annotations[define.InspectAnnotationAutoremoveImage] == define.InspectResponseTrue
 }
 
 // Timezone returns the timezone configured inside the container.

@@ -3,17 +3,20 @@
 package integration
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	. "github.com/containers/podman/v5/test/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	. "github.com/onsi/gomega/gexec"
+	"github.com/opencontainers/runtime-spec/specs-go"
 )
 
 // in-container mount point: using a path that is definitely not present
@@ -139,6 +142,23 @@ var _ = Describe("Podman run with volumes", func() {
 		session := podmanTest.Podman([]string{"run", "-v", mountPath + ":" + dest, "-v", "/tmp" + ":" + dest, ALPINE, "ls"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitWithError(125, fmt.Sprintf("%s: duplicate mount destination", dest)))
+
+		session = podmanTest.Podman([]string{"run", "-v", "myvol:" + dest, "-v", mountPath + ":" + dest + ":O", ALPINE, "ls", "/test"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).To(ExitWithError(125, fmt.Sprintf("%s: duplicate mount destination", dest)))
+	})
+
+	It("podman run with single character volume", func() {
+		// 1. create single character volume
+		session := podmanTest.Podman([]string{"volume", "create", "a"})
+		session.WaitWithDefaultTimeout()
+		volName := session.OutputToString()
+		Expect(session).Should(ExitCleanly())
+
+		// 2. create container with volume
+		session = podmanTest.Podman([]string{"run", "--volume", volName + ":/data", ALPINE, "sh", "-c", "echo hello world"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
 	})
 
 	It("podman run with conflict between image volume and user mount succeeds", func() {
@@ -430,9 +450,27 @@ var _ = Describe("Podman run with volumes", func() {
 		Expect(separateVolumeSession).Should(ExitCleanly())
 		Expect(separateVolumeSession.OutputToString()).To(Equal(baselineOutput))
 
-		copySession := podmanTest.Podman([]string{"run", "--rm", "-v", "testvol3:/etc/apk:copy", ALPINE, "stat", "-c", "%h", "/etc/apk/arch"})
-		copySession.WaitWithDefaultTimeout()
-		Expect(copySession).Should(ExitCleanly())
+		podmanTest.PodmanExitCleanly("run", "--name", "testctr", "-v", "testvol3:/etc/apk:copy", ALPINE, "stat", "-c", "%h", "/etc/apk/arch")
+
+		inspect := podmanTest.PodmanExitCleanly("container", "inspect", "testctr", "--format", "{{.OCIConfigPath}}")
+
+		// Make extra check that the OCI config does not contain the copy opt, runc 1.3.0 fails on that while crun does not.
+		// We only test crun upstream so make sure the spec is sane: https://github.com/containers/podman/issues/26938
+		f, err := os.Open(inspect.OutputToString())
+		Expect(err).ToNot(HaveOccurred())
+		defer f.Close()
+		var spec specs.Spec
+		err = json.NewDecoder(f).Decode(&spec)
+		Expect(err).ToNot(HaveOccurred())
+
+		found := false
+		for _, m := range spec.Mounts {
+			if m.Destination == "/etc/apk" {
+				found = true
+				Expect(m.Options).To(Equal([]string{"rprivate", "nosuid", "nodev", "rbind"}))
+			}
+		}
+		Expect(found).To(BeTrue(), "OCI spec contains /etc/apk mount")
 
 		noCopySession := podmanTest.Podman([]string{"run", "--rm", "-v", "testvol4:/etc/apk:nocopy", ALPINE, "stat", "-c", "%h", "/etc/apk/arch"})
 		noCopySession.WaitWithDefaultTimeout()
@@ -842,14 +880,17 @@ VOLUME /test/`, ALPINE)
 	It("podman run with --mount and named volume with driver-opts", func() {
 		// anonymous volume mount with driver opts
 		vol := "type=volume,source=test_vol,dst=/test,volume-opt=type=tmpfs,volume-opt=device=tmpfs,volume-opt=o=nodev"
-		session := podmanTest.Podman([]string{"run", "--rm", "--mount", vol, ALPINE, "echo", "hello"})
-		session.WaitWithDefaultTimeout()
-		Expect(session).Should(ExitCleanly())
+		// Loop twice to cover both the initial code path that creates the volume and the ones which reuses it.
+		for i := range 2 {
+			name := "testctr" + strconv.Itoa(i)
+			podmanTest.PodmanExitCleanly("run", "--name", name, "--mount", vol, ALPINE, "echo", "hello")
 
-		inspectVol := podmanTest.Podman([]string{"volume", "inspect", "test_vol"})
-		inspectVol.WaitWithDefaultTimeout()
-		Expect(inspectVol).Should(ExitCleanly())
-		Expect(inspectVol.OutputToString()).To(ContainSubstring("nodev"))
+			inspectVol := podmanTest.PodmanExitCleanly("volume", "inspect", "test_vol")
+			Expect(inspectVol.OutputToString()).To(ContainSubstring("nodev"))
+
+			inspect := podmanTest.PodmanExitCleanly("container", "inspect", name, "--format", "{{range .Mounts}}{{.Options}}{{end}}")
+			Expect(inspect.OutputToString()).To(ContainSubstring("[nosuid nodev rbind]"))
+		}
 	})
 
 	It("volume permissions after run", func() {
@@ -1068,5 +1109,64 @@ RUN chmod 755 /test1 /test2 /test3`, ALPINE)
 		Expect(session).To(ExitCleanly())
 
 		mountVolumeAndCheckDirectory(volName, "/test3", "test2", imgName)
+	})
+
+	It("podman run --mount type=volume,subpath=", func() {
+		volName := "testvol"
+		mkvol := podmanTest.Podman([]string{"volume", "create", volName})
+		mkvol.WaitWithDefaultTimeout()
+		Expect(mkvol).Should(ExitCleanly())
+
+		subvol := "/test/test2/"
+		pathInCtr := "/mnt"
+		pathToCreate := filepath.Join(pathInCtr, subvol)
+		popvol := podmanTest.Podman([]string{"run", "-v", fmt.Sprintf("%s:/mnt", volName), ALPINE, "sh", "-c", fmt.Sprintf("mkdir -p %s; touch %s; touch %s", pathToCreate, filepath.Join(pathToCreate, "foo"), filepath.Join(pathToCreate, "bar"))})
+		popvol.WaitWithDefaultTimeout()
+		Expect(popvol).Should(ExitCleanly())
+
+		checkCtr := podmanTest.Podman([]string{"run", "--mount", fmt.Sprintf("type=volume,source=%s,target=%s,subpath=%s", volName, pathInCtr, subvol), ALPINE, "ls", pathInCtr})
+		checkCtr.WaitWithDefaultTimeout()
+		Expect(checkCtr).To(ExitCleanly())
+		Expect(checkCtr.OutputToString()).To(ContainSubstring("foo"))
+		Expect(checkCtr.OutputToString()).To(ContainSubstring("bar"))
+	})
+
+	It("user-specified overlay supersedes image volume", func() {
+		err := podmanTest.RestoreArtifact(REDIS_IMAGE)
+		Expect(err).ToNot(HaveOccurred())
+		mountPath := filepath.Join(podmanTest.TempDir, "secrets")
+		err = os.Mkdir(mountPath, 0755)
+		Expect(err).ToNot(HaveOccurred())
+		testFile := filepath.Join(mountPath, "test1")
+		f, err := os.Create(testFile)
+		Expect(err).ToNot(HaveOccurred(), "os.Create(testfile)")
+		f.Close()
+		Expect(err).ToNot(HaveOccurred())
+		session := podmanTest.Podman([]string{"run", "-v", fmt.Sprintf("%s:/data:O", mountPath), REDIS_IMAGE, "ls", "/data/test1"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+	})
+
+	It("--mount flag defaults to volume if no type given", func() {
+		volName := "testvol"
+		podmanTest.PodmanExitCleanly("volume", "create", volName)
+
+		podmanTest.PodmanExitCleanly("run", "--rm", "--mount", fmt.Sprintf("src=%s,dest=/mnt", volName), ALPINE, "touch", "/mnt/testfile")
+		outTest := podmanTest.PodmanExitCleanly("run", "--rm", "--mount", fmt.Sprintf("type=volume,src=%s,dest=/mnt", volName), ALPINE, "ls", "/mnt")
+		Expect(outTest.OutputToString()).To(ContainSubstring("testfile"))
+	})
+
+	It("podman run --tmpfs with noatime option", func() {
+		session := podmanTest.Podman([]string{"run", "--rm", "--tmpfs", "/mytmpfs:noatime", ALPINE, "grep", "mytmpfs", "/proc/self/mountinfo"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+		output := session.OutputToString()
+		Expect(output).To(ContainSubstring("noatime"))
+
+		session = podmanTest.Podman([]string{"run", "--rm", "--tmpfs", "/mytmpfs", ALPINE, "grep", "mytmpfs", "/proc/self/mountinfo"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+		output = session.OutputToString()
+		Expect(output).ToNot(ContainSubstring("noatime"))
 	})
 })

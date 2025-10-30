@@ -29,8 +29,6 @@ type OCIRuntime interface { //nolint:interfacebloat
 	// the given container if it is a restore and if restoreOptions.PrintStats
 	// is true. In all other cases the returned int64 is 0.
 	CreateContainer(ctr *Container, restoreOptions *ContainerCheckpointOptions) (int64, error)
-	// UpdateContainerStatus updates the status of the given container.
-	UpdateContainerStatus(ctr *Container) error
 	// StartContainer starts the given container.
 	StartContainer(ctr *Container) error
 	// KillContainer sends the given signal to the given container.
@@ -154,6 +152,14 @@ type OCIRuntime interface { //nolint:interfacebloat
 	// of this file means that the container was oom killed.
 	// This is the path to that file for a given container.
 	OOMFilePath(ctr *Container) (string, error)
+
+	// PersistDirectoryPath is the path to a container's persist directory.
+	// Not all OCI runtime implementations will have a persist directory.
+	// If they do, it may contain files such as the exit file and the OOM
+	// file.
+	// If the directory does not exist, the empty string and no error should
+	// be returned.
+	PersistDirectoryPath(ctr *Container) (string, error)
 
 	// RuntimeInfo returns verbose information about the runtime.
 	RuntimeInfo() (*define.ConmonInfo, *define.OCIRuntimeInfo, error)

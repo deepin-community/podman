@@ -10,15 +10,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/containers/podman/v5/libpod/define"
 	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/containers/podman/v5/pkg/domain/entities/reports"
+	"github.com/containers/podman/v5/pkg/emulation"
 	"github.com/containers/podman/v5/pkg/util"
 	"github.com/containers/storage"
 	"github.com/containers/storage/pkg/directory"
 	"github.com/containers/storage/pkg/fileutils"
-	"github.com/sirupsen/logrus"
 )
 
 func (ic *ContainerEngine) Info(ctx context.Context) (*define.Info, error) {
@@ -26,6 +27,9 @@ func (ic *ContainerEngine) Info(ctx context.Context) (*define.Info, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	info.Host.EmulatedArchitectures = emulation.Registered()
+
 	info.Host.RemoteSocket = &define.RemoteSocket{Path: ic.Libpod.RemoteURI()}
 
 	// `podman system connection add` invokes podman via ssh to fill in connection string. Here
@@ -48,31 +52,28 @@ func (ic *ContainerEngine) Info(ctx context.Context) (*define.Info, error) {
 		info.Host.RemoteSocket.Path = uri.Path
 	}
 
-	uri, err := url.Parse(ic.Libpod.RemoteURI())
-	if err != nil {
-		return nil, err
-	}
-
-	if uri.Scheme == "unix" {
-		err := fileutils.Exists(uri.Path)
+	// check if the unix path exits, if not unix socket we always we assume it exists, i.e. tcp socket
+	path, found := strings.CutPrefix(info.Host.RemoteSocket.Path, "unix://")
+	if found {
+		err := fileutils.Exists(path)
 		info.Host.RemoteSocket.Exists = err == nil
 	} else {
 		info.Host.RemoteSocket.Exists = true
 	}
 
-	return info, err
+	return info, nil
 }
 
-// SystemPrune removes unused data from the system. Pruning pods, containers, networks, volumes and images.
+// SystemPrune removes unused data from the system. Pruning pods, containers, build container, networks, volumes and images.
 func (ic *ContainerEngine) SystemPrune(ctx context.Context, options entities.SystemPruneOptions) (*entities.SystemPruneReport, error) {
 	var systemPruneReport = new(entities.SystemPruneReport)
 
 	if options.External {
-		if options.All || options.Volume || len(options.Filters) > 0 {
+		if options.All || options.Volume || len(options.Filters) > 0 || options.Build {
 			return nil, fmt.Errorf("system prune --external cannot be combined with other options")
 		}
-		err := ic.Libpod.GarbageCollect()
-		if err != nil {
+
+		if err := ic.Libpod.GarbageCollect(); err != nil {
 			return nil, err
 		}
 		return systemPruneReport, nil
@@ -83,6 +84,17 @@ func (ic *ContainerEngine) SystemPrune(ctx context.Context, options entities.Sys
 		filters = append(filters, fmt.Sprintf("%s=%s", k, v[0]))
 	}
 	reclaimedSpace := (uint64)(0)
+
+	// Prune Build Containers
+	if options.Build {
+		stageContainersPruneReports, err := ic.Libpod.PruneBuildContainers()
+		if err != nil {
+			return nil, err
+		}
+		reclaimedSpace += reports.PruneReportsSize(stageContainersPruneReports)
+		systemPruneReport.ContainerPruneReports = append(systemPruneReport.ContainerPruneReports, stageContainersPruneReports...)
+	}
+
 	found := true
 	for found {
 		found = false
@@ -298,12 +310,6 @@ func (ic *ContainerEngine) Migrate(ctx context.Context, options entities.SystemM
 	return ic.Libpod.Migrate(options.NewRuntime)
 }
 
-func (se SystemEngine) Shutdown(ctx context.Context) {
-	if err := se.Libpod.Shutdown(false); err != nil {
-		logrus.Error(err)
-	}
-}
-
 func unshareEnv(graphroot, runroot string) []string {
 	return append(os.Environ(), "_CONTAINERS_USERNS_CONFIGURED=done",
 		fmt.Sprintf("CONTAINERS_GRAPHROOT=%s", graphroot),
@@ -326,7 +332,7 @@ func (ic *ContainerEngine) Unshare(ctx context.Context, args []string, options e
 	return unshare()
 }
 
-func (ic ContainerEngine) Version(ctx context.Context) (*entities.SystemVersionReport, error) {
+func (ic *ContainerEngine) Version(ctx context.Context) (*entities.SystemVersionReport, error) {
 	var report entities.SystemVersionReport
 	v, err := define.GetVersion()
 	if err != nil {
@@ -336,7 +342,7 @@ func (ic ContainerEngine) Version(ctx context.Context) (*entities.SystemVersionR
 	return &report, err
 }
 
-func (ic ContainerEngine) Locks(ctx context.Context) (*entities.LocksReport, error) {
+func (ic *ContainerEngine) Locks(ctx context.Context) (*entities.LocksReport, error) {
 	var report entities.LocksReport
 	conflicts, held, err := ic.Libpod.LockConflicts()
 	if err != nil {
@@ -347,7 +353,7 @@ func (ic ContainerEngine) Locks(ctx context.Context) (*entities.LocksReport, err
 	return &report, nil
 }
 
-func (ic ContainerEngine) SystemCheck(ctx context.Context, options entities.SystemCheckOptions) (*entities.SystemCheckReport, error) {
+func (ic *ContainerEngine) SystemCheck(ctx context.Context, options entities.SystemCheckOptions) (*entities.SystemCheckReport, error) {
 	report, err := ic.Libpod.SystemCheck(ctx, options)
 	if err != nil {
 		return nil, err

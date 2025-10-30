@@ -30,6 +30,11 @@ func resetMachine() error {
 		logrus.Errorf("unable to load machines: %q", err)
 	}
 
+	machines, err := p.GetAllMachinesAndRootfulness()
+	if err != nil {
+		return err
+	}
+
 	for _, mc := range mcs {
 		state, err := provider.State(mc, false)
 		if err != nil {
@@ -42,7 +47,7 @@ func resetMachine() error {
 			}
 		}
 
-		if err := connection.RemoveConnections(mc.Name, mc.Name+"-root"); err != nil {
+		if err := connection.RemoveConnections(machines, mc.Name, mc.Name+"-root"); err != nil {
 			logrus.Error(err)
 		}
 
@@ -62,7 +67,7 @@ func resetMachine() error {
 		logrus.Errorf("unable to remove machine data dir %q: %q", dirs.DataDir.GetPath(), err)
 	}
 
-	if err := utils.GuardedRemoveAll(dirs.RuntimeDir.GetPath()); err != nil {
+	if err := utils.RemoveFilesExcept(dirs.RuntimeDir.GetPath(), "podman.sock"); err != nil {
 		logrus.Errorf("unable to remove machine runtime dir %q: %q", dirs.RuntimeDir.GetPath(), err)
 	}
 

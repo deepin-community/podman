@@ -10,13 +10,11 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/containers/common/pkg/config"
 	"github.com/containers/image/v5/docker/reference"
 	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/libpod/events"
 	"github.com/containers/podman/v5/pkg/api/handlers"
 	"github.com/containers/podman/v5/pkg/bindings"
 	"github.com/containers/podman/v5/pkg/bindings/containers"
@@ -580,7 +578,6 @@ func makeExecConfig(options entities.ExecOptions) *handlers.ExecCreateConfig {
 	createConfig.AttachStdin = options.Interactive
 	createConfig.AttachStdout = true
 	createConfig.AttachStderr = true
-	createConfig.Detach = false
 	createConfig.DetachKeys = options.DetachKeys
 	createConfig.Env = env
 	createConfig.WorkingDir = options.WorkDir
@@ -647,7 +644,7 @@ func (ic *ContainerEngine) ContainerExecDetached(ctx context.Context, nameOrID s
 	return sessionID, nil
 }
 
-func startAndAttach(ic *ContainerEngine, name string, detachKeys *string, sigProxy bool, input, output, errput *os.File) error {
+func startAndAttach(ic *ContainerEngine, name string, detachKeys *string, sigProxy bool, input, output, errput *os.File) (int, error) {
 	if output == nil && errput == nil {
 		fmt.Printf("%s\n", name)
 	}
@@ -668,9 +665,14 @@ func startAndAttach(ic *ContainerEngine, name string, detachKeys *string, sigPro
 	go func() {
 		err := containers.Attach(ic.ClientCtx, name, input, output, errput, attachReady, options)
 		attachErr <- err
+		close(attachErr)
 	}()
 	// Wait for the attach to actually happen before starting
 	// the container.
+
+	cancelCtx, cancel := context.WithCancel(ic.ClientCtx)
+	defer cancel()
+	var code int
 	select {
 	case <-attachReady:
 		startOptions := new(containers.StartOptions)
@@ -678,13 +680,44 @@ func startAndAttach(ic *ContainerEngine, name string, detachKeys *string, sigPro
 			startOptions.WithDetachKeys(*dk)
 		}
 		if err := containers.Start(ic.ClientCtx, name, startOptions); err != nil {
-			return err
+			return -1, err
+		}
+
+		// Call wait immediately after start to avoid racing against container removal when it was created with --rm.
+		// It must be run in a separate goroutine to so we do not block when attach returns early, i.e. user
+		// detaches in which case wait would not return.
+		waitChan := make(chan error)
+		go func() {
+			defer close(waitChan)
+
+			exitCode, err := containers.Wait(cancelCtx, name, nil)
+			if err != nil {
+				waitChan <- fmt.Errorf("wait for container: %w", err)
+				return
+			}
+			code = int(exitCode)
+		}()
+
+		select {
+		case err := <-waitChan:
+			if err != nil {
+				return -1, err
+			}
+		case err := <-attachErr:
+			if err != nil {
+				return -1, err
+			}
+			// also wait for the wait to be complete in this case
+			err = <-waitChan
+			if err != nil {
+				return -1, err
+			}
 		}
 	case err := <-attachErr:
-		return err
+		return -1, err
 	}
 	// If attachReady happens first, wait for containers.Attach to complete
-	return <-attachErr
+	return code, <-attachErr
 }
 
 func logIfRmError(id string, err error, reports []*reports.RmReport) {
@@ -742,7 +775,7 @@ func (ic *ContainerEngine) ContainerStart(ctx context.Context, namesOrIds []stri
 		}
 		ctrRunning := ctr.State == define.ContainerStateRunning.String()
 		if options.Attach {
-			err = startAndAttach(ic, name, &options.DetachKeys, options.SigProxy, options.Stdin, options.Stdout, options.Stderr)
+			code, err := startAndAttach(ic, name, &options.DetachKeys, options.SigProxy, options.Stdin, options.Stdout, options.Stderr)
 			if err == define.ErrDetach {
 				// User manually detached
 				// Exit cleanly immediately
@@ -766,33 +799,10 @@ func (ic *ContainerEngine) ContainerStart(ctx context.Context, namesOrIds []stri
 			if ctr.AutoRemove {
 				// Defer the removal, so we can return early if needed and
 				// de-spaghetti the code.
-				defer func() {
-					shouldRestart, err := containers.ShouldRestart(ic.ClientCtx, ctr.ID, nil)
-					if err != nil {
-						logrus.Errorf("Failed to check if %s should restart: %v", ctr.ID, err)
-						return
-					}
-					logrus.Errorf("Should restart: %v", shouldRestart)
-
-					if !shouldRestart && ctr.AutoRemove {
-						removeContainer(ctr.ID, ctr.CIDFile)
-					}
-				}()
+				defer removeContainer(ctr.ID, ctr.CIDFile)
 			}
 
-			exitCode, err := containers.Wait(ic.ClientCtx, name, nil)
-			if err == define.ErrNoSuchCtr {
-				// Check events
-				event, err := ic.GetLastContainerEvent(ctx, name, events.Exited)
-				if err != nil {
-					logrus.Errorf("Cannot get exit code: %v", err)
-					report.ExitCode = define.ExecErrorCodeNotFound
-				} else {
-					report.ExitCode = *event.ContainerExitCode
-				}
-			} else {
-				report.ExitCode = int(exitCode)
-			}
+			report.ExitCode = code
 			reports = append(reports, &report)
 			return reports, nil
 		}
@@ -861,7 +871,7 @@ func (ic *ContainerEngine) ContainerRun(ctx context.Context, opts entities.Conta
 	for _, w := range con.Warnings {
 		fmt.Fprintf(os.Stderr, "%s\n", w)
 	}
-	removeContainer := func(id, CIDFile string, force bool) error {
+	removeContainer := func(id, CIDFile string, force bool) {
 		if CIDFile != "" {
 			if err := os.Remove(CIDFile); err != nil && !errors.Is(err, os.ErrNotExist) {
 				logrus.Warnf("Cleaning up CID file: %s", err)
@@ -871,13 +881,12 @@ func (ic *ContainerEngine) ContainerRun(ctx context.Context, opts entities.Conta
 		removeOptions := new(containers.RemoveOptions).WithVolumes(true).WithForce(force)
 		reports, err := containers.Remove(ic.ClientCtx, id, removeOptions)
 		logIfRmError(id, err, reports)
-		return err
 	}
 
 	if opts.CIDFile != "" {
 		if err := util.CreateIDFile(opts.CIDFile, con.ID); err != nil {
 			// If you fail to create CIDFile then remove the container
-			_ = removeContainer(con.ID, opts.CIDFile, true)
+			removeContainer(con.ID, opts.CIDFile, true)
 			return nil, err
 		}
 	}
@@ -890,7 +899,7 @@ func (ic *ContainerEngine) ContainerRun(ctx context.Context, opts entities.Conta
 		if err != nil {
 			report.ExitCode = define.ExitCode(err)
 			if opts.Rm {
-				_ = removeContainer(con.ID, opts.CIDFile, true)
+				removeContainer(con.ID, opts.CIDFile, true)
 			}
 		}
 		return &report, err
@@ -904,81 +913,26 @@ func (ic *ContainerEngine) ContainerRun(ctx context.Context, opts entities.Conta
 			return err
 		})
 	}
-	if err := startAndAttach(ic, con.ID, &opts.DetachKeys, opts.SigProxy, opts.InputStream, opts.OutputStream, opts.ErrorStream); err != nil {
+
+	code, err := startAndAttach(ic, con.ID, &opts.DetachKeys, opts.SigProxy, opts.InputStream, opts.OutputStream, opts.ErrorStream)
+	if err != nil {
 		if err == define.ErrDetach {
 			return &report, nil
 		}
 
 		report.ExitCode = define.ExitCode(err)
 		if opts.Rm {
-			_ = removeContainer(con.ID, opts.CIDFile, false)
+			removeContainer(con.ID, opts.CIDFile, false)
 		}
 		return &report, err
 	}
 
 	if opts.Rm {
-		// Defer the removal, so we can return early if needed and
-		// de-spaghetti the code.
-		defer func() {
-			shouldRestart, err := containers.ShouldRestart(ic.ClientCtx, con.ID, nil)
-			if err != nil {
-				logrus.Errorf("Failed to check if %s should restart: %v", con.ID, err)
-				return
-			}
-
-			if !shouldRestart {
-				_ = removeContainer(con.ID, opts.CIDFile, false)
-			}
-		}()
+		removeContainer(con.ID, opts.CIDFile, false)
 	}
 
-	// Wait
-	exitCode, waitErr := containers.Wait(ic.ClientCtx, con.ID, nil)
-	if waitErr == nil {
-		report.ExitCode = int(exitCode)
-		return &report, nil
-	}
-
-	// Determine why the wait failed.  If the container doesn't exist,
-	// consult the events.
-	if !errorhandling.Contains(waitErr, define.ErrNoSuchCtr) {
-		return &report, waitErr
-	}
-
-	// Events
-	eventsChannel := make(chan *events.Event)
-	eventOptions := entities.EventsOptions{
-		EventChan: eventsChannel,
-		Filter: []string{
-			"type=container",
-			fmt.Sprintf("container=%s", con.ID),
-			fmt.Sprintf("event=%s", events.Exited),
-		},
-	}
-
-	var lastEvent *events.Event
-	var mutex sync.Mutex
-	mutex.Lock()
-	// Read the events.
-	go func() {
-		for e := range eventsChannel {
-			lastEvent = e
-		}
-		mutex.Unlock()
-	}()
-
-	eventsErr := ic.Events(ctx, eventOptions)
-
-	// Wait for all events to be read
-	mutex.Lock()
-	if eventsErr != nil || lastEvent == nil {
-		logrus.Errorf("Cannot get exit code: %v", err)
-		report.ExitCode = define.ExecErrorCodeNotFound
-		return &report, nil //nolint: nilerr
-	}
-
-	report.ExitCode = *lastEvent.ContainerExitCode
-	return &report, err
+	report.ExitCode = code
+	return &report, nil
 }
 
 func (ic *ContainerEngine) Diff(ctx context.Context, namesOrIDs []string, opts entities.DiffOptions) (*entities.DiffReport, error) {
@@ -1090,11 +1044,6 @@ func (ic *ContainerEngine) ContainerStats(ctx context.Context, namesOrIds []stri
 	return containers.Stats(ic.ClientCtx, namesOrIds, new(containers.StatsOptions).WithStream(options.Stream).WithInterval(options.Interval).WithAll(options.All))
 }
 
-// ShouldRestart reports back whether the container will restart.
-func (ic *ContainerEngine) ShouldRestart(_ context.Context, id string) (bool, error) {
-	return containers.ShouldRestart(ic.ClientCtx, id, nil)
-}
-
 // ContainerRename renames the given container.
 func (ic *ContainerEngine) ContainerRename(ctx context.Context, nameOrID string, opts entities.ContainerRenameOptions) error {
 	return containers.Rename(ic.ClientCtx, nameOrID, new(containers.RenameOptions).WithName(opts.NewName))
@@ -1106,13 +1055,6 @@ func (ic *ContainerEngine) ContainerClone(ctx context.Context, ctrCloneOpts enti
 
 // ContainerUpdate finds and updates the given container's cgroup config with the specified options
 func (ic *ContainerEngine) ContainerUpdate(ctx context.Context, updateOptions *entities.ContainerUpdateOptions) (string, error) {
-	err := specgen.WeightDevices(updateOptions.Specgen)
-	if err != nil {
-		return "", err
-	}
-	err = specgen.FinishThrottleDevices(updateOptions.Specgen)
-	if err != nil {
-		return "", err
-	}
+	updateOptions.ProcessSpecgen()
 	return containers.Update(ic.ClientCtx, updateOptions)
 }

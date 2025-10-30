@@ -141,6 +141,47 @@ var _ = Describe("Podman push", func() {
 		Expect(output).To(ContainSubstring("zstd"))
 	})
 
+	It("push test --force-compression --format=v2s2", func() {
+		if podmanTest.Host.Arch == "ppc64le" {
+			Skip("No registry image for ppc64le")
+		}
+		if isRootless() {
+			err := podmanTest.RestoreArtifact(REGISTRY_IMAGE)
+			Expect(err).ToNot(HaveOccurred())
+		}
+		lock := GetPortLock("5005")
+		defer lock.Unlock()
+		session := podmanTest.Podman([]string{"run", "-d", "--name", "registry", "-p", "5005:5000", REGISTRY_IMAGE, "/entrypoint.sh", "/etc/docker/registry/config.yml"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+
+		if !WaitContainerReady(podmanTest, "registry", "listening on", 20, 1) {
+			Skip("Cannot start docker registry.")
+		}
+
+		session = podmanTest.Podman([]string{"build", "-t", "imageone", "build/basicalpine"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+
+		push := podmanTest.Podman([]string{"push", "-q", "--tls-verify=false", "--force-compression=true", "--compression-format", "gzip", "--format", "v2s2", "--remove-signatures", "imageone", "localhost:5005/image"})
+		push.WaitWithDefaultTimeout()
+		Expect(push).Should(ExitCleanly())
+
+		skopeoInspect := []string{"inspect", "--tls-verify=false", "--raw", "docker://localhost:5005/image:latest"}
+		skopeo := SystemExec("skopeo", skopeoInspect)
+		skopeo.WaitWithDefaultTimeout()
+		Expect(skopeo).Should(ExitCleanly())
+		output := skopeo.OutputToString()
+		Expect(output).To(ContainSubstring("gzip"))
+
+		push = podmanTest.Podman([]string{"push", "-q", "--tls-verify=false", "--force-compression=true", "--compression-format", "zstd", "--format", "v2s2", "--remove-signatures", "imageone", "localhost:5005/image"})
+		push.WaitWithDefaultTimeout()
+		// the command is asking for an impossible thing; per containers/common#1869, we should detect
+		// that and fail with a precise error, but that does not exist, so we end up reporting this
+		// misleading text. When that is resolved, this test will need updating.
+		Expect(push).Should(ExitWithError(125, "cannot use ForceCompressionFormat with undefined default compression format"))
+	})
+
 	It("podman push to local registry", func() {
 		if podmanTest.Host.Arch == "ppc64le" {
 			Skip("No registry image for ppc64le")
@@ -176,9 +217,10 @@ var _ = Describe("Podman push", func() {
 		publicKeyFileName, _, err := WriteRSAKeyPair(keyFileName, bitSize)
 		Expect(err).ToNot(HaveOccurred())
 
-		// Force zstd here because zstd:chunked throws a warning, https://github.com/containers/image/issues/2485.
 		if !IsRemote() { // Remote does not support --encryption-key
-			push = podmanTest.Podman([]string{"push", "-q", "--compression-format=zstd", "--encryption-key", "jwe:" + publicKeyFileName, "--tls-verify=false", "--remove-signatures", ALPINE, "localhost:5003/my-alpine"})
+			// Explicitly specify compression-format because encryption and zstd:chunked together triggers a warning:
+			//	Compression using zstd:chunked is not beneficial for encrypted layers, using plain zstd instead
+			push = podmanTest.Podman([]string{"push", "-q", "--encryption-key", "jwe:" + publicKeyFileName, "--tls-verify=false", "--remove-signatures", "--compression-format=zstd", ALPINE, "localhost:5003/my-alpine"})
 			push.WaitWithDefaultTimeout()
 			Expect(push).Should(ExitCleanly())
 		}
@@ -355,8 +397,9 @@ var _ = Describe("Podman push", func() {
 		publicKeyFileName, _, err := WriteRSAKeyPair(keyFileName, bitSize)
 		Expect(err).ToNot(HaveOccurred())
 
-		// Force zstd here because zstd:chunked throws a warning, https://github.com/containers/image/issues/2485.
-		session := podmanTest.Podman([]string{"push", "-q", "--compression-format=zstd", "--encryption-key", "jwe:" + publicKeyFileName, ALPINE, fmt.Sprintf("oci:%s", bbdir)})
+		// Explicitly specify compression-format because encryption and zstd:chunked together triggers a warning:
+		//	Compression using zstd:chunked is not beneficial for encrypted layers, using plain zstd instead
+		session := podmanTest.Podman([]string{"push", "-q", "--encryption-key", "jwe:" + publicKeyFileName, "--compression-format=zstd", ALPINE, fmt.Sprintf("oci:%s", bbdir)})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 

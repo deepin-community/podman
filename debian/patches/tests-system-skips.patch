@@ -1,0 +1,36 @@
+From: Reinhard Tartler <siretart@tauware.de>
+Date: Thu, 3 Oct 2024 07:18:40 -0400
+Subject: test/system: Skip some system tests that fail in Debian
+
+Forwarded: not-needed
+---
+ test/system/030-run.bats  | 2 +-
+ test/system/075-exec.bats | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/test/system/030-run.bats b/test/system/030-run.bats
+index eb0b90a..5e0f750 100644
+--- a/test/system/030-run.bats
++++ b/test/system/030-run.bats
+@@ -846,7 +846,7 @@ json-file | f
+     is "$output" ".*HOME=/.*"
+ }
+ 
+-# bats test_tags=ci:parallel
++# bats test_tags=ci:parallel, debian_ignore
+ @test "podman run --timeout - basic test" {
+     cname=c_$(safename)
+     t0=$SECONDS
+diff --git a/test/system/075-exec.bats b/test/system/075-exec.bats
+index 61fee46..3ae4b10 100644
+--- a/test/system/075-exec.bats
++++ b/test/system/075-exec.bats
+@@ -47,7 +47,7 @@ load helpers
+     run_podman rm $cid
+ }
+ 
+-# bats test_tags=distro-integration
++# bats test_tags=distro-integration, debian_ignore
+ @test "podman exec - leak check" {
+     skip_if_remote "test is meaningless over remote"
+ 

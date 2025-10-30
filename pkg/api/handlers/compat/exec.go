@@ -74,7 +74,7 @@ func ExecCreateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Automatically log to syslog if the server has log-level=debug set
-	exitCommandArgs, err := specgenutil.CreateExitCommandArgs(storageConfig, runtimeConfig, logrus.IsLevelEnabled(logrus.DebugLevel), true, true)
+	exitCommandArgs, err := specgenutil.CreateExitCommandArgs(storageConfig, runtimeConfig, logrus.IsLevelEnabled(logrus.DebugLevel), true, false, true)
 	if err != nil {
 		utils.InternalServerError(w, err)
 		return
@@ -200,7 +200,7 @@ func ExecStartHandler(w http.ResponseWriter, r *http.Request) {
 		t := r.Context().Value(api.IdleTrackerKey).(*idle.Tracker)
 		defer t.Close()
 
-		if err != nil {
+		if err != nil && !errors.Is(err, define.ErrDetach) {
 			// Cannot report error to client as a 500 as the Upgrade set status to 101
 			logErr(err)
 		}

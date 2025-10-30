@@ -5,7 +5,7 @@
 
 load helpers
 
-# bats test_tags=distro-integration
+# bats test_tags=distro-integration, ci:parallel
 @test "podman test all namespaces" {
     # format is nsname | option name
     tests="
@@ -18,7 +18,7 @@ uts    | uts
 
     for nstype in private host; do
         while read name option; do
-            local cname="c_${name}_$(random_string)"
+            local cname="c-${name}-$(safename)"
             # ipc is special, private does not allow joining from another container.
             # Instead we must use "shareable".
             local type=$nstype
@@ -38,7 +38,13 @@ uts    | uts
             run_podman logs $cname
             con1_ns="$output"
 
-            assert "$con1_ns" == "$con2_ns" "($name) namespace matches (type: $type)"
+            if [[ "$option" = "pid" ]] && is_rootless && ! is_remote && [[ "$(podman_runtime)" = "runc" ]]; then
+                # Replace "pid:[1234567]" with "pid:\[1234567\]"
+                con1_ns_esc="${con1_ns//[\[\]]/\\&}"
+                assert "$con2_ns" =~ "${con1_ns_esc}.*warning .*" "($name) namespace matches (type: $type)"
+            else
+                assert "$con1_ns" == "$con2_ns" "($name) namespace matches (type: $type)"
+            fi
             local matcher="=="
             if [[ "$type" != "host" ]]; then
                 matcher="!="
