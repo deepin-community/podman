@@ -7,3 +7,5 @@ system-goimports.patch
 0007-test-update-timezone-checks.patch
 0008-cirrus-update-CI-images.patch
 0009-test-localsystem-skip-test-podman-network-reload.patch
+CVE-2025-6032.patch
+CVE-2025-9566.patch
