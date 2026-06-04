@@ -1,3 +1,4 @@
+CVE-2026-33414.patch
 system-goimports.patch
 0002-Revert-update-to-docker-27.patch
 0003-TestProviders-Skip-test-if-unable-to-list-providers.patch

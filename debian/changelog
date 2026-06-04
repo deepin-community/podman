@@ -1,3 +1,13 @@
+podman (5.2.5-1deepin3) unstable; urgency=medium
+
+  * Fix CVE-2026-33414
+    Fix command injection in podman's HyperV machine backend by passing
+    the VM image path via environment variable instead of embedding it
+    directly in a PowerShell double-quoted string. (CVE-2026-33414)
+    Upstream: https://github.com/containers/podman/commit/6cffe93d888f0cfbf586ce4fb91ca85010d3f470
+
+ -- deepin-ci-robot <packages@deepin.org>  Thu, 04 Jun 2026 17:25:55 +0800
+
 podman (5.2.5-1deepin2) unstable; urgency=medium
 
   * fix CVE-2025-6032 CVE-2025-9566 
