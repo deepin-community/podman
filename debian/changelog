@@ -1,3 +1,12 @@
+podman (5.2.5-1deepin3) unstable; urgency=medium
+
+  * Fix CVE-2024-11218: Bump buildah dependency to >= 1.37.6
+    Race condition in podman build/buildah with --jobs=2 allows container
+    breakout. Fix requires building against golang-github-containers-buildah-dev
+    >= 1.37.6 which includes the upstream fix.
+
+ -- deepin-ci-robot <packages@deepin.org>  Wed, 24 Jun 2026 19:20:00 +0800
+
 podman (5.2.5-1deepin2) unstable; urgency=medium
 
   * fix CVE-2025-6032 CVE-2025-9566 
