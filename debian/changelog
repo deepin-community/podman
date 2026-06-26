@@ -1,3 +1,16 @@
+podman (5.2.5-1deepin3) unstable; urgency=medium
+
+  * Fix CVE-2024-1753 - container escape via build mounts
+    (fixed by buildah >= 1.33.7 dependency)
+  * Fix CVE-2024-9675 - cache mount path validation
+    (fixed by buildah >= 1.37.4 dependency)
+  * Fix CVE-2024-11218 - TOCTOU race condition with --jobs in builds
+    (fixed by backport to buildah >= 1.37.5+ds1-1deepin1)
+  * Note: CVE-2024-3056 is a kernel limitation (IPC resource DoS),
+    not fixable via package bump, documented for completeness
+
+ -- deepin-ci-robot <packages@deepin.org>  Fri, 26 Jun 2026 13:24:00 +0800
+
 podman (5.2.5-1deepin2) unstable; urgency=medium
 
   * fix CVE-2025-6032 CVE-2025-9566 
