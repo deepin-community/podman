@@ -1,3 +1,12 @@
+podman (5.2.5-1deepin5) unstable; urgency=medium
+
+  * fix CVE-2026-57231: container image with env var key-only leaks host env vars
+    When parsing image envs we need to be strict about the format, only the
+    "key=value" format must be accepted. Just keys must be rejected as they
+    are not valid according to the image spec.
+
+ -- deepin-ci-robot <packages@deepin.org>  Wed, 01 Jul 2026 13:41:39 +0800
+
 podman (5.2.5-1deepin4) unstable; urgency=medium
 
   * fix(cve): CVE-2026-55686
