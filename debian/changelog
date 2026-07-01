@@ -1,3 +1,9 @@
+podman (5.2.5-1deepin3) unstable; urgency=medium
+
+  * fix CVE-2026-57231: container image with env var key-only leaks host env vars
+
+ -- deepin-ci-robot <packages@deepin.org>  Wed, 01 Jul 2026 13:41:39 +0800
+
 podman (5.2.5-1deepin2) unstable; urgency=medium
 
   * fix CVE-2025-6032 CVE-2025-9566 
