@@ -1,0 +1,14 @@
+Index: podman/test/system/500-networking.bats
+===================================================================
+--- podman.orig/test/system/500-networking.bats
++++ podman/test/system/500-networking.bats
+@@ -310,7 +310,8 @@ load helpers.network
+ }
+ 
+ # CANNOT BE PARALLELIZED due to iptables/nft commands
+-# bats test_tags=distro-integration
++# remove after https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1085953 is resolved
++# bats test_tags=distro-integration, debian_ignore
+ @test "podman network reload" {
+     skip_if_remote "podman network reload does not have remote support"
+ 

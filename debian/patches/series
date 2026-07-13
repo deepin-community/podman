@@ -6,3 +6,6 @@ tests-unit-skips.patch
 tests-system-skips.patch
 tests-integration-skips.patch
 CVE-2025-6032.patch
+CVE-2025-9566.patch
+tests-system-ignore-debian.patch
+tests-system-network-reload-skip.patch

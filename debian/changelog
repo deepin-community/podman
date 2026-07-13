@@ -1,3 +1,12 @@
+podman (5.4.2+ds1-2deepin1) unstable; urgency=medium
+
+  * Backport patches from master branch:
+    - Apply fix for CVE-2025-9566 (Closes: #1108473)
+    - Skip some system tests that fail on Debian
+    - Skip test 'podman network reload' to workaround #1085953
+
+ -- lichenggang <lichenggang@deepin.org>  Mon, 13 Jul 2026 14:34:17 +0800
+
 podman (5.4.2+ds1-2) unstable; urgency=medium
 
   * Team upload
