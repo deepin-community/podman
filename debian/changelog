@@ -1,3 +1,9 @@
+podman (5.2.5-1deepin4) unstable; urgency=medium
+
+  * fix(cve): CVE-2026-55686
+
+ -- deepin-ci-robot <packages@deepin.org>  Tue, 21 Jul 2026 06:13:33 +0800
+
 podman (5.2.5-1deepin3) unstable; urgency=medium
 
   * Fix CVE-2026-33414
