@@ -1,3 +1,9 @@
+podman (5.2.5-1deepin3) unstable; urgency=medium
+
+  * reserve storage driver selection during upgrades.
+
+ -- liujianqiang <liujianqiang@uniontech.com>  Thu, 06 Aug 2026 21:03:54 +0800
+
 podman (5.2.5-1deepin2) unstable; urgency=medium
 
   * fix CVE-2025-6032 CVE-2025-9566 
