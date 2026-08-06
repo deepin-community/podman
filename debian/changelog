@@ -1,3 +1,9 @@
+podman (5.2.5.1-1deepin5) unstable; urgency=medium
+
+  * Upgrade version and merge into UOS.
+
+ -- liujianqiang <liujianqiang@uniontech.com>  Thu, 06 Aug 2026 22:11:32 +0800
+
 podman (5.2.5-1deepin3) unstable; urgency=medium
 
   * reserve storage driver selection during upgrades.
