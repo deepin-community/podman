@@ -1,3 +1,18 @@
+podman (5.2.5.2-1deepin4) unstable; urgency=medium
+
+  * fix CVE-2026-57231: container image with env var key-only leaks host env vars
+    When parsing image envs we need to be strict about the format, only the
+    "key=value" format must be accepted. Just keys must be rejected as they
+    are not valid according to the image spec.
+  * fix(cve): CVE-2026-55686
+  * Fix CVE-2026-33414
+    Fix command injection in podman's HyperV machine backend by passing
+    the VM image path via environment variable instead of embedding it
+    directly in a PowerShell double-quoted string. (CVE-2026-33414)
+    Upstream: https://github.com/containers/podman/commit/6cffe93d888f0cfbf586ce4fb91ca85010d3f470
+
+ -- deepin-ci-robot <packages@deepin.org>  Wed, 01 Jul 2026 13:41:39 +0800
+
 podman (5.2.5.2-1deepin3) unstable; urgency=medium
 
   * Upgrade version and merge into UOS.

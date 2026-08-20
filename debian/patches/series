@@ -1,3 +1,4 @@
+CVE-2026-33414.patch
 system-goimports.patch
 0002-Revert-update-to-docker-27.patch
 0003-TestProviders-Skip-test-if-unable-to-list-providers.patch
@@ -7,5 +8,7 @@ system-goimports.patch
 0007-test-update-timezone-checks.patch
 0008-cirrus-update-CI-images.patch
 0009-test-localsystem-skip-test-podman-network-reload.patch
+CVE-2026-57231.patch
 CVE-2025-6032.patch
 CVE-2025-9566.patch
+CVE-2026-55686.patch
