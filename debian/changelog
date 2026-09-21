@@ -1,3 +1,13 @@
+podman (5.2.5.2-1deepin5) unstable; urgency=medium
+
+  * Deliver overlay storage configuration via postinst only when both
+    graphdrivers exist under /var/lib/containers/storage and no
+    configuration is present in /etc, keeping existing configurations
+    untouched during upgrades, and remove the delivered configuration
+    on purge.
+
+ -- liujianqiang <liujianqiang@uniontech.com>  Mon, 21 Sep 2026 14:16:27 +0800
+
 podman (5.2.5.2-1deepin4) unstable; urgency=medium
 
   * fix CVE-2026-57231: container image with env var key-only leaks host env vars
