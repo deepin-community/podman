@@ -16,25 +16,25 @@ set -e
 
 case "$1" in
     configure)
-        if [ -n "$2" ]; then
-            storage_root=/var/lib/containers/storage
-            storage_conf=/etc/containers/storage.conf
+        storage_root=/var/lib/containers/storage
+        storage_conf=/etc/containers/storage.conf
+        storage_conf_template=/usr/share/podman/storage.conf
 
-            if [ -f "$storage_conf" ]; then
-                has_vfs=0
-                has_overlay=0
-                [ -d "$storage_root/vfs" ] && has_vfs=1
-                [ -d "$storage_root/overlay" ] && has_overlay=1
+        has_vfs=0
+        has_overlay=0
+        [ -d "$storage_root/vfs" ] && has_vfs=1
+        [ -d "$storage_root/overlay" ] && has_overlay=1
 
-                # Only strip the explicit driver when exactly one graphdriver
-                # is present, so Podman reuses the historical storage selection
-                # without rewriting the database. When neither exists (e.g.,
-                # same-version reinstall before Podman has ever run) keep the
-                # overlay default so a fresh start still selects overlay.
-                if [ "$has_vfs" -ne "$has_overlay" ]; then
-                    sed -i '/^driver[[:space:]]*=/d' "$storage_conf"
-                fi
-            fi
+        # Deliver the explicit overlay configuration only when both
+        # graphdrivers exist under the storage root and no configuration
+        # is present in /etc yet. Upgrades keep an existing configuration
+        # untouched so Podman reuses the historical storage selection,
+        # while installs hitting the ambiguous two-driver state get an
+        # explicit overlay default.
+        if [ "$has_vfs" -eq 1 ] && [ "$has_overlay" -eq 1 ] \
+            && [ ! -e "$storage_conf" ] && [ -f "$storage_conf_template" ]; then
+            mkdir -p /etc/containers
+            cp "$storage_conf_template" "$storage_conf"
         fi
 
         # Podman 3.0 dropped the varlink interface, so we need to cleanup
