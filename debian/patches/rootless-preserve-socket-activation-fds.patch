@@ -1,33 +1,62 @@
 From: UOS Deepin Podman Maintainers <uos-maintainers@uniontech.com>
-Date: Mon, 12 Oct 2026 10:00:00 +0800
+Date: Wed, 15 Oct 2026 14:00:00 +0800
 Subject: rootless: preserve systemd socket activation fds across re-exec
 
 When podman.service is socket-activated at user login and races with the
-other podman units (podman-restart.service, podman-auto-update.service,
-podman-clean-transient.service) to set up the rootless pause process, the
-re-executed child can lose the race for the pause PID file.  In that case
-podman falls back to reexec_userns_join(), which forks again.
+other podman units to set up the rootless pause process, the re-executed
+child can lose the race for the pause PID file and fall back to
+reexec_userns_join(), which forks again.
 
 The parent of reexec_in_user_namespace() used to close the LISTEN_FDS
-socket (fd 3) before this fallback.  As a result the final child inherited
-a stale fd at fd 3 (the user-namespace handle, which is closed by CLOEXEC
-at exec), so the journald datagram socket then reused fd 3.  The API
-service subsequently tried to accept(2) on a datagram socket and failed
-with "accept4: operation not supported", leaving podman.service failed at
-boot while a manual restart worked.
+socket (fd 3) before this fallback, so the final child inherited a stale
+fd 3 (the CLOEXEC user-namespace handle) and the journald datagram socket
+then reused fd 3.  The API service tried to accept(2) on a datagram
+socket and failed with "accept4: operation not supported".
 
-Stop closing the activation fds in the parent; they are released when the
-parent exits after the child terminates.
+Move the close out of reexec_in_user_namespace() into a new
+close_systemd_activation_fds() helper that the parent calls only after
+the pause PID race is resolved.  On the success path the fds are still
+closed so they are not leaked for the lifetime of the child; on the
+race-lost path they stay open so reexec_userns_join() can hand them to
+the final child.
 
 ---
- pkg/rootless/rootless_linux.c | 19 ++++++++-----------
- 1 file changed, 8 insertions(+), 11 deletions(-)
+ pkg/rootless/rootless_linux.c  | 31 ++++++++++++++++++++-----------
+ pkg/rootless/rootless_linux.go |  2 ++
+ 2 files changed, 22 insertions(+), 11 deletions(-)
 
 diff --git a/pkg/rootless/rootless_linux.c b/pkg/rootless/rootless_linux.c
-index ddb97b3..273dbf6 100644
+index ddb97b3..6f8308b 100644
 --- a/pkg/rootless/rootless_linux.c
 +++ b/pkg/rootless/rootless_linux.c
-@@ -981,17 +981,14 @@ reexec_in_user_namespace (int ready, char *pause_pid_file_path)
+@@ -947,6 +947,26 @@ check_proc_sys_userns_file (const char *path)
+     }
+ }
+ 
++int
++close_systemd_activation_fds (void)
++{
++  if (do_socket_activation)
++    {
++      long num_fds;
++
++      num_fds = strtol (saved_systemd_listen_fds, NULL, 10);
++      if (num_fds != LONG_MIN && num_fds != LONG_MAX)
++        {
++          int f;
++
++          for (f = 3; f < num_fds + 3; f++)
++            if (is_fd_inherited (f))
++              close (f);
++        }
++    }
++  return 0;
++}
++
+ int
+ reexec_in_user_namespace (int ready, char *pause_pid_file_path)
+ {
+@@ -981,17 +1001,6 @@ reexec_in_user_namespace (int ready, char *pause_pid_file_path)
      {
        if (do_socket_activation)
          {
@@ -42,14 +71,26 @@ index ddb97b3..273dbf6 100644
 -                if (is_fd_inherited (f))
 -                  close (f);
 -            }
-+          /* Do not close the systemd socket activation file descriptors here.
-+             If the re-executed child loses the race for the pause PID file, we
-+             fall back to reexec_userns_join(), which forks again and needs
-+             these fds to remain open so that the final child can inherit the
-+             listen socket.  Closing them here would make the final child end
-+             up with a reused (e.g. journald) datagram socket at fd 3, breaking
-+             the API service with "accept4: operation not supported".  The fds
-+             are released when this process exits after the child terminates.  */
            unsetenv ("LISTEN_PID");
            unsetenv ("LISTEN_FDS");
            unsetenv ("LISTEN_FDNAMES");
+diff --git a/pkg/rootless/rootless_linux.go b/pkg/rootless/rootless_linux.go
+index 3ad3906..e03a03b 100644
+--- a/pkg/rootless/rootless_linux.go
++++ b/pkg/rootless/rootless_linux.go
+@@ -36,6 +36,7 @@ extern int reexec_in_user_namespace(int ready, char *pause_pid_file_path);
+ extern int reexec_in_user_namespace_wait(int pid, int options);
+ extern int reexec_userns_join(int pid, char *pause_pid_file_path);
+ extern int is_fd_inherited(int fd);
++extern int close_systemd_activation_fds(void);
+ */
+ import "C"
+ 
+@@ -373,6 +374,7 @@ func becomeRootInUserNS(pausePid string) (_ bool, _ int, retErr error) {
+ 		return false, -1, errors.New("setting up the process")
+ 	}
+ 
++	C.close_systemd_activation_fds()
+ 	return waitAndProxySignalsToChild(pidC)
+ }
+ 
