@@ -1,3 +1,16 @@
+podman (5.2.5.2-1deepin8) unstable; urgency=medium
+
+  * fix(cve): CVE-2026-94603 (critical) - Revert "Enable 'podman run'
+    for checkpoint images"   Upstream: https://github.com/podman-
+    container-
+    tools/podman/commit/7728ba0a90094408ad9078e36c3622a651d49616,https:/
+    /github.com/podman-container-
+    tools/podman/commit/24706290d5c974f078d8ca284026802515f28e92,https:/
+    /github.com/podman-container-
+    tools/podman/commit/29c8c6e50607df7a7d735ace09ff0ea099c0b3e0
+
+ -- deepin-ci-robot <packages@deepin.org>  Tue, 20 Oct 2026 22:45:50 +0800
+
 podman (5.2.5.2-1deepin7) unstable; urgency=medium
 
   * preserve systemd socket activation fds on re-exec: keep the activation
