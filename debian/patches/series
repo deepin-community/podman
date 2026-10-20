@@ -13,3 +13,4 @@ CVE-2025-6032.patch
 CVE-2025-9566.patch
 CVE-2026-55686.patch
 rootless-preserve-socket-activation-fds.patch
+CVE-2026-94603.patch
