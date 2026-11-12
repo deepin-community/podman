@@ -1,3 +1,12 @@
+podman (5.2.5.2-1deepin9) unstable; urgency=medium
+
+  * fix(cve): CVE-2026-121885 (medium) - libpod: do not inherit auto
+    update labels from image   Upstream: https://github.com/podman-
+    container-
+    tools/podman/commit/652dca60e3a02b960f1b2be08fa07af880094620
+
+ -- deepin-ci-robot <packages@deepin.org>  Thu, 12 Nov 2026 08:16:48 +0800
+
 podman (5.2.5.2-1deepin8) unstable; urgency=medium
 
   * fix(cve): CVE-2026-94603 (critical) - Revert "Enable 'podman run'
