@@ -1,3 +1,15 @@
+podman (5.2.5.2-1deepin10) unstable; urgency=medium
+
+  * Additional archive extraction hardening: backport upstream a49ad4be
+    (25aee24cbd), "use chrootarchive over plain archive package", apart
+    from the podman-remote save hunk that upstream reverted in fd07b9c6e.
+    This is hardening only and is not the podman load OCI-archive fix:
+    that extraction is performed by containers/image and remains
+    vulnerable until containers/storage >= 1.62.1 and containers/image
+    >= 5.39.3 (GHSA-3gcv-x57j-xqxv) are available in the archive.
+
+ -- deepin-ci-robot <packages@deepin.org>  Mon, 23 Nov 2026 19:42:50 +0800
+
 podman (5.2.5.2-1deepin9) unstable; urgency=medium
 
   * fix(cve): CVE-2026-121885 (medium) - libpod: do not inherit auto
