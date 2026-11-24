@@ -1,0 +1,191 @@
+Description: archive: use chrootarchive over plain archive package (additional hardening)
+ Backport the upstream "use chrootarchive over plain archive package" change
+ (a49ad4be, cherry-picked from 25aee24cbd), which upstream describes as
+ "Just as additional hardening".  It is NOT the fix for CVE-2025-11395: the
+ authoritative fix is the container-libs security update GHSA-3gcv-x57j-xqxv,
+ i.e. containers/storage >= 1.62.1 and containers/image >= 5.39.3 (or the
+ consolidated backports acbb1e7 / bdae767).  This package builds against
+ containers/storage 1.55.1 and containers/image 5.32.2, so the podman load
+ OCI-archive unpack path in containers/image is unchanged by this patch.
+ .
+ Adapted for the 5.2 source layout: podman volume import extracts through
+ utils.UntarToFileSystem in this version, so that call site is hardened as
+ well.
+ .
+ The pkg/domain/infra/tunnel/images.go hunk of the upstream commit is
+ deliberately omitted: upstream reverted that line in fd07b9c6e because
+ chrootarchive cannot work for the rootless podman-remote client
+ ("creating mount namespace before pivot: operation not permitted"), which
+ broke podman-remote save -f oci-dir/docker-dir.
+Author: Paul Holzinger <pholzing@redhat.com>
+Origin: https://github.com/podman-container-tools/podman/commit/a49ad4be81c5afaff6034a94c07c3f27d345f8f1
+Last-Update: Tue Nov 24 15:30:00 2026 +0800
+---
+diff --git a/libpod/container_internal_common.go b/libpod/container_internal_common.go
+index 31866c3..b8cc266 100644
+--- a/libpod/container_internal_common.go
++++ b/libpod/container_internal_common.go
+@@ -46,6 +46,7 @@ import (
+ 	"github.com/containers/podman/v5/pkg/util"
+ 	"github.com/containers/podman/v5/version"
+ 	"github.com/containers/storage/pkg/archive"
++	"github.com/containers/storage/pkg/chrootarchive"
+ 	"github.com/containers/storage/pkg/fileutils"
+ 	"github.com/containers/storage/pkg/idtools"
+ 	"github.com/containers/storage/pkg/lockfile"
+@@ -1083,11 +1084,10 @@ func (c *Container) exportCheckpoint(options ContainerCheckpointOptions) error {
+ 			if mp == "" {
+ 				return fmt.Errorf("volume %s is not mounted, cannot export: %w", volume.Name(), define.ErrInternal)
+ 			}
+-
+-			input, err := archive.TarWithOptions(mp, &archive.TarOptions{
++			input, err := chrootarchive.Tar(mp, &archive.TarOptions{
+ 				Compression:      archive.Uncompressed,
+ 				IncludeSourceDir: true,
+-			})
++			}, mp)
+ 			if err != nil {
+ 				return fmt.Errorf("reading volume directory %q: %w", v.Dest, err)
+ 			}
+@@ -1102,12 +1102,12 @@ func (c *Container) exportCheckpoint(options ContainerCheckpointOptions) error {
+ 		}
+ 	}
+ 
+-	input, err := archive.TarWithOptions(c.bundlePath(), &archive.TarOptions{
++	bundle := c.bundlePath()
++	input, err := chrootarchive.Tar(bundle, &archive.TarOptions{
+ 		Compression:      options.Compression,
+ 		IncludeSourceDir: true,
+ 		IncludeFiles:     includeFiles,
+-	})
+-
++	}, bundle)
+ 	if err != nil {
+ 		return fmt.Errorf("reading checkpoint directory %q: %w", c.ID(), err)
+ 	}
+@@ -1188,10 +1188,10 @@ func (c *Container) checkpoint(ctx context.Context, options ContainerCheckpointO
+ 		}
+ 		defer shmDirTarFile.Close()
+ 
+-		input, err := archive.TarWithOptions(c.config.ShmDir, &archive.TarOptions{
++		input, err := chrootarchive.Tar(c.config.ShmDir, &archive.TarOptions{
+ 			Compression:      archive.Uncompressed,
+ 			IncludeSourceDir: true,
+-		})
++		}, c.config.ShmDir)
+ 		if err != nil {
+ 			return nil, 0, err
+ 		}
+@@ -1364,7 +1364,7 @@ func (c *Container) importPreCheckpoint(input string) error {
+ 
+ 	defer archiveFile.Close()
+ 
+-	err = archive.Untar(archiveFile, c.bundlePath(), nil)
++	err = chrootarchive.Untar(archiveFile, c.bundlePath(), nil)
+ 	if err != nil {
+ 		return fmt.Errorf("unpacking of pre-checkpoint archive %s failed: %w", input, err)
+ 	}
+@@ -1627,7 +1627,7 @@ func (c *Container) restore(ctx context.Context, options ContainerCheckpointOpti
+ 			}
+ 			defer shmDirTarFile.Close()
+ 
+-			if err := archive.UntarUncompressed(shmDirTarFile, c.config.ShmDir, nil); err != nil {
++			if err := chrootarchive.UntarUncompressed(shmDirTarFile, c.config.ShmDir, nil); err != nil {
+ 				return nil, 0, err
+ 			}
+ 		}
+@@ -1667,7 +1667,7 @@ func (c *Container) restore(ctx context.Context, options ContainerCheckpointOpti
+ 			if mountPoint == "" {
+ 				return nil, 0, fmt.Errorf("unable to import volume %s as it is not mounted: %w", volume.Name(), err)
+ 			}
+-			if err := archive.UntarUncompressed(volumeFile, mountPoint, nil); err != nil {
++			if err := chrootarchive.UntarUncompressed(volumeFile, mountPoint, nil); err != nil {
+ 				return nil, 0, fmt.Errorf("failed to extract volume %s to %s: %w", volumeFilePath, mountPoint, err)
+ 			}
+ 		}
+diff --git a/pkg/api/handlers/compat/images_build.go b/pkg/api/handlers/compat/images_build.go
+index baf9463..50e91c6 100644
+--- a/pkg/api/handlers/compat/images_build.go
++++ b/pkg/api/handlers/compat/images_build.go
+@@ -29,6 +29,7 @@ import (
+ 	"github.com/containers/podman/v5/pkg/rootless"
+ 	"github.com/containers/podman/v5/pkg/util"
+ 	"github.com/containers/storage/pkg/archive"
++	"github.com/containers/storage/pkg/chrootarchive"
+ 	"github.com/containers/storage/pkg/fileutils"
+ 	"github.com/docker/docker/pkg/jsonmessage"
+ 	"github.com/opencontainers/runtime-spec/specs-go"
+@@ -916,6 +917,6 @@ func extractTarFile(anchorDir string, r *http.Request) (string, error) {
+ 		return "", err
+ 	}
+ 
+-	err = archive.Untar(r.Body, buildDir, nil)
++	err = chrootarchive.Untar(r.Body, buildDir, nil)
+ 	return buildDir, err
+ }
+diff --git a/pkg/checkpoint/crutils/checkpoint_restore_utils.go b/pkg/checkpoint/crutils/checkpoint_restore_utils.go
+index 3736ea1..f561294 100644
+--- a/pkg/checkpoint/crutils/checkpoint_restore_utils.go
++++ b/pkg/checkpoint/crutils/checkpoint_restore_utils.go
+@@ -12,6 +12,7 @@ import (
+ 	metadata "github.com/checkpoint-restore/checkpointctl/lib"
+ 	"github.com/checkpoint-restore/go-criu/v7/stats"
+ 	"github.com/containers/storage/pkg/archive"
++	"github.com/containers/storage/pkg/chrootarchive"
+ 	"github.com/opencontainers/selinux/go-selinux/label"
+ )
+ 
+@@ -34,7 +35,7 @@ func CRImportCheckpointWithoutConfig(destination, input string) error {
+ 			metadata.SpecDumpFile,
+ 		},
+ 	}
+-	if err = archive.Untar(archiveFile, destination, options); err != nil {
++	if err = chrootarchive.Untar(archiveFile, destination, options); err != nil {
+ 		return fmt.Errorf("unpacking of checkpoint archive %s failed: %w", input, err)
+ 	}
+ 
+@@ -64,7 +65,7 @@ func CRImportCheckpointConfigOnly(destination, input string) error {
+ 			metadata.CheckpointVolumesDirectory,
+ 		},
+ 	}
+-	if err = archive.Untar(archiveFile, destination, options); err != nil {
++	if err = chrootarchive.Untar(archiveFile, destination, options); err != nil {
+ 		return fmt.Errorf("unpacking of checkpoint archive %s failed: %w", input, err)
+ 	}
+ 
+@@ -109,7 +110,7 @@ func CRApplyRootFsDiffTar(baseDirectory, containerRootDirectory string) error {
+ 	}
+ 	defer rootfsDiffFile.Close()
+ 
+-	if err := archive.Untar(rootfsDiffFile, containerRootDirectory, nil); err != nil {
++	if err := chrootarchive.Untar(rootfsDiffFile, containerRootDirectory, nil); err != nil {
+ 		return fmt.Errorf("failed to apply root file-system diff file %s: %w", rootfsDiffPath, err)
+ 	}
+ 
+@@ -152,11 +153,11 @@ func CRCreateRootFsDiffTar(changes *[]archive.Change, mountPoint, destination st
+ 	}
+ 
+ 	if len(rootfsIncludeFiles) > 0 {
+-		rootfsTar, err := archive.TarWithOptions(mountPoint, &archive.TarOptions{
++		rootfsTar, err := chrootarchive.Tar(mountPoint, &archive.TarOptions{
+ 			Compression:      archive.Uncompressed,
+ 			IncludeSourceDir: true,
+ 			IncludeFiles:     rootfsIncludeFiles,
+-		})
++		}, mountPoint)
+ 		if err != nil {
+ 			return includeFiles, fmt.Errorf("exporting root file-system diff to %q: %w", rootfsDiffPath, err)
+ 		}
+diff --git a/utils/utils.go b/utils/utils.go
+index 9643fde..6cb776d 100644
+--- a/utils/utils.go
++++ b/utils/utils.go
+@@ -52,7 +52,7 @@ func ExecCmdWithStdStreams(stdin io.Reader, stdout, stderr io.Writer, env []stri
+ // UntarToFileSystem untars an os.file of a tarball to a destination in the filesystem
+ func UntarToFileSystem(dest string, tarball *os.File, options *archive.TarOptions) error {
+ 	logrus.Debugf("untarring %s", tarball.Name())
+-	return archive.Untar(tarball, dest, options)
++	return chrootarchive.Untar(tarball, dest, options)
+ }
+ 
+ // Creates a new tar file and writes bytes from io.ReadCloser
